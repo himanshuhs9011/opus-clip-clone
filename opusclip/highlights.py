@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+
+import numpy as np
 from dataclasses import dataclass
 
 from .audio import AudioFeatures
@@ -408,14 +410,78 @@ JUDGE_SCHEMA = {
 }
 
 
+LABEL = re.compile(r"\s*[\(\[]\s*[A-Za-z]{1,12}\s*[:=]\s*\d{1,3}\s*[\)\]]")
+DEVANAGARI = re.compile(r"[ऀ-ॿ]")
+
+
+def romanize(clips: list[Clip], llm: LLM | None, log=None) -> None:
+    """Hindi videos: titles and banners in Devanagari become Hinglish (Latin letters), the way
+    Indian creators write on Shorts. One AI call for all of them; untouched if it fails."""
+    if llm is None or not llm.available:
+        return
+    slots = [(c, f) for c in clips for f in ("title", "banner") if DEVANAGARI.search(getattr(c, f) or "")]
+    if not slots:
+        return
+    lines = [getattr(c, f) for c, f in slots]
+    user = ("Rewrite each line in Hinglish: Hindi words in Latin letters, English words stay "
+            "English, same meaning, same CAPS emphasis. Return JSON {\"lines\": [...]} in the same "
+            "order.\n\n" + "\n".join(f"{i}. {t}" for i, t in enumerate(lines)))
+    try:
+        data = llm.json_completion("You transliterate Hindi to Hinglish. Reply with JSON only.", user,
+                                   schema={"type": "object", "properties": {"lines": {
+                                       "type": "array", "items": {"type": "string"}}}, "required": ["lines"]},
+                                   max_tokens=1200, temperature=0.1)
+    except LLMError as e:
+        if log:
+            log(f"Hinglish rewrite skipped: {str(e)[:100]}")
+        return
+    out = data.get("lines") or []
+    fixed = 0
+    for (c, f), new in zip(slots, out):
+        new = str(new or "").strip()
+        if new and not DEVANAGARI.search(new) and not CJK.search(new):
+            setattr(c, f, new[:110])
+            fixed += 1
+    if log and fixed:
+        log(f"rewrote {fixed} Devanagari titles/banners in Hinglish")
+
+
+def auto_intro(p: dict, audio: AudioFeatures, length: float = 3.2) -> list[float]:
+    """Hook teaser for a clip: the loudest ~3 s after its opening, cut on word edges."""
+    a, b = float(p["start"]), float(p["end"])
+    words = sorted(p.get("words") or [], key=lambda w: w.start)
+    if b - a < 12 or not words:
+        return []
+    per = max(1, int(round(1.0 / audio.hop)))
+    best, best_t = -1.0, None
+    t = a + 2.0
+    while t + length <= b - 0.5:
+        i0, i1 = int(t / audio.hop), int((t + length) / audio.hop)
+        seg = audio.rms[i0:i1]
+        if seg.size >= per:
+            v = float(np.mean(seg)) + 0.5 * float(np.max(seg))
+            if v > best:
+                best, best_t = v, t
+        t += 0.5
+    if best_t is None:
+        return []
+    starts = [w for w in words if best_t - 1.0 <= w.start <= best_t + 0.6]
+    h0 = (starts[0].start - 0.05) if starts else best_t
+    ends = [w for w in words if h0 + 1.8 <= w.end <= h0 + 4.2]
+    h1 = (ends[-1].end + 0.12) if ends else h0 + length
+    return [round(max(a, h0), 3), round(min(b, h1), 3)]
+
+
 def viral_judge(shortlist: list[tuple[dict, Score]], llm: LLM, topic: str, log=None) -> None:
     """Second AI pass: rank the shortlist side by side and blend that into each score."""
     blocks = []
+    per = int(max(200, min(900, (llm.context_chars - 3000) / max(1, len(shortlist)))))
     for i, (p, _) in enumerate(shortlist):
         text = p["text"].strip()
-        if len(text) > 900:
-            text = text[:900] + " ..."
-        blocks.append(f"[{i}] ({p['end'] - p['start']:.0f}s) {text}")
+        if len(text) > per:
+            text = text[:per] + " ..."
+        what = f"WHAT HAPPENS: {p['summary']} | " if p.get("gaming") and p.get("summary") else ""
+        blocks.append(f"[{i}] ({p['end'] - p['start']:.0f}s) {what}{text}")
     user = ((f"Channel niche: {topic}\n\n" if topic else "")
             + "Candidate clips (id, length, transcript):\n\n" + "\n\n".join(blocks)
             + "\n\nJudge every clip.")
@@ -493,6 +559,17 @@ def select(
                              language=language, log=log, min_len=max(10.0, min_len * 0.7),
                              max_len=min(60.0, max_len))
         model = f"gaming agent ({llm.label})" if llm is not None and llm.available else "gaming agent (rules)"
+        talky = sum(len(s.words) for s in sentences) / max(1.0, (duration or sentences[-1].end) / 60) >= 25
+        if llm is not None and llm.available and talky and len(picks) < k * 2:
+            # the streamer talks a lot: stories, rants and reveals make clips too, not only
+            # the loud moments. Read the talk the normal way and pool both.
+            if log:
+                log(f"gaming agent found {len(picks)}; also reading the talk for story clips")
+            talk = llm_select(sentences, cands, llm, topic, k, log, min_len, max_len, context=context,
+                              language=language)
+            picks = picks + [t for t in talk if not any(
+                min(t["end"], q["end"]) - max(t["start"], q["start"]) > 0.3 * (t["end"] - t["start"])
+                for q in picks)]
     elif llm is not None and llm.available:
         picks = llm_select(sentences, cands, llm, topic, k, log, min_len, max_len, context=context,
                            language=language)
@@ -508,6 +585,10 @@ def select(
                 # streams are judged on hype as much as on words: sparse speech is normal there
                 bonus = int(round(30 * (float(p.get("hype", 0.3)) - 0.3)))
                 sc.total = int(max(0, min(100, sc.total + bonus)))
+                if p.get("viral_score"):
+                    # the agent's 5x20 rubric (hook, emotion, shareability, clarity, payoff)
+                    sc.total = int(round(0.6 * float(p["viral_score"]) + 0.4 * sc.total))
+                    sc.features["viral_rubric"] = round(float(p["viral_score"]), 1)
                 sc.features["hype"] = round(float(p.get("hype", 0)), 2)
                 sc.reasons = ([f"{str(p.get('kind', 'hype')).capitalize()} moment found by the gaming agent"]
                               + sc.reasons)[:4]
@@ -544,7 +625,7 @@ def select(
             shortlist.append((p, sc))
 
     take(tightened(scored(picks)))                                    # the AI's picks first
-    if not gaming:                                                    # then rule-based
+    if not gaming or len(shortlist) < k:                              # then rule-based
         take(tightened(scored(heuristic_select(all_cands, sentences, cap * 2))))
 
     if llm is not None and llm.available and len(shortlist) >= 2:
@@ -554,13 +635,22 @@ def select(
     passed = [x for x in shortlist if x[1].total >= min_score]
     if log and min_score:
         log(f"quality bar {min_score}: {len(passed)} of {len(shortlist)} candidates pass")
+    # the bar trims weak clips but never leaves a long video with one or two: keep at least
+    # half of what was asked when near-misses (within 12 points) exist
+    floor = min(k, max(2, (k + 1) // 2))
+    if len(passed) < floor:
+        extra = [x for x in shortlist if x not in passed and x[1].total >= min_score - 12]
+        added = extra[: floor - len(passed)]
+        if added and log:
+            log(f"quality bar: kept {len(added)} near-miss clips so you still get {len(passed) + len(added)}")
+        passed = sorted(passed + added, key=lambda x: x[1].total, reverse=True)
     chosen = (passed or shortlist[:1])[:k]
 
     cjk_ok = (language or "")[:2] in ("zh", "ja", "ko")
 
     def clean(text: str) -> str:
         """Small models sometimes drift into Chinese; drop such text unless the video is CJK."""
-        text = (text or "").strip()
+        text = LABEL.sub("", (text or "")).strip()       # leaked tags like "(H:76)"
         return "" if (not cjk_ok and CJK.search(text)) else text
 
     clips: list[Clip] = []
@@ -577,10 +667,14 @@ def select(
             why=p.get("why") or (sc.reasons[0] if sc.reasons else ""),
             hashtags=[h for h in (p.get("hashtags") or hashtags_for(p["text"])) if clean(h)],
             banner=clean(p.get("banner")) or (title if p.get("gaming") else ""),
+            intro=list(p.get("intro") or []) or auto_intro(p, audio),
+            skips=list(p.get("skips") or []),
             score=sc,
             rank=rank,
         )
         if p.get("risks"):
             clip.score.risks = list(dict.fromkeys(list(sc.risks) + p["risks"]))[:4]
         clips.append(clip)
+    if (language or "")[:2] == "hi":
+        romanize(clips, llm, log)
     return clips, model

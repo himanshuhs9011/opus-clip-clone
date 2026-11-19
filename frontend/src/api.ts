@@ -41,6 +41,7 @@ export interface Edit {
     speakers: Record<string, string>;
   };
   title: { enabled: boolean; text: string | null; seconds: number; mode?: "auto" | "banner" | "hook" };
+  intro?: { enabled: boolean };
   progress: { enabled: boolean; color: string; position: "top" | "bottom" };
   zoom: { enabled: boolean; strength: number };
   cuts: { silence: boolean; fillers: boolean; removed: string[] };
@@ -149,6 +150,7 @@ export interface Options {
   stream_template?: StreamTemplate;
   zoom: boolean;
   title: boolean;
+  intro?: boolean;
   emoji: boolean;
   progress: boolean;
   silence: boolean;

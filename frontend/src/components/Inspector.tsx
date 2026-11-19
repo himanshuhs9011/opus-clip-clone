@@ -132,6 +132,12 @@ export function Inspector({
             {edit.zoom.enabled && (
               <Slider label="Zoom strength" min={0.04} max={0.3} step={0.01} value={edit.zoom.strength} set={(v) => onEdit({ ...edit, zoom: { ...edit.zoom, strength: v } })} fmt={(v) => `+${Math.round(v * 100)}%`} />
             )}
+            <Toggle
+              label="Hook intro"
+              sub="Plays the clip's strongest 2-4 s first, then a white flash into the clip. Shows in the export."
+              on={edit.intro?.enabled ?? true}
+              set={(v) => onEdit({ ...edit, intro: { enabled: v } })}
+            />
             <Toggle label="Progress bar" on={edit.progress.enabled} set={(v) => onEdit({ ...edit, progress: { ...edit.progress, enabled: v } })} />
             {edit.progress.enabled && (
               <div className="row gap8 field">

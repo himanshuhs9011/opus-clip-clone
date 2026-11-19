@@ -36,6 +36,8 @@ DEFAULT_EDIT: dict = {
     "progress": {"enabled": False, "color": "#FFD400", "position": "top"},
     "zoom": {"enabled": True, "strength": 0.10},
     # gaming / stream layout: face-cam panel + gameplay panel
+    # hook teaser: the clip's strongest 2-4 s plays first, a white flash, then the clip
+    "intro": {"enabled": True},
     "stream": {"auto": True, "template": "stack", "corner": "tl", "cam": "top", "cam_size": 0.48,
                "cam_zoom": 1.0, "game": "fill"},
     "cuts": {"silence": False, "fillers": False, "removed": []},   # removed: word start in ms
@@ -167,6 +169,15 @@ def keep_segments(words: list[Word], a: float, b: float, cuts: dict) -> list[tup
         last = rel[kept_idx[-1]]
         if dur - last[1] > 0.45:
             drop.append((last[1] + 0.25, dur))
+
+    for r in cuts.get("ranges") or []:          # dull stretches the AI cut out (absolute times)
+        try:
+            s, e = float(r[0]) - a, float(r[1]) - a
+        except (TypeError, ValueError, IndexError):
+            continue
+        s, e = max(0.0, s), min(dur, e)
+        if e - s >= 0.5:
+            drop.append((s, e))
 
     if not drop:
         return [(0.0, dur)]

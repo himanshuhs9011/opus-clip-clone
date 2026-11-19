@@ -35,9 +35,10 @@ LENGTHS = {"ai": (8.0, 90.0), "short": (12.0, 30.0), "medium": (30.0, 60.0), "lo
 QUALITY = {"any": 0, "good": 65, "viral": 75}
 
 DEFAULT_OPTIONS: dict = {
-    "clips": 6,
+    "clips": 0,                 # 0 = auto (about one clip per 3.5 min of video)
     "length": "ai",
     "quality": "good",
+    "intro": True,              # hook teaser before each clip
     "content": "auto",          # auto | talk | gaming (gaming = hype-based agent for streams)
     "topic": "",
     "provider": None,          # None = settings.llm_provider
@@ -67,7 +68,7 @@ _job_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="job")
 
 def normalize_options(opts: dict | None) -> dict:
     o = {**DEFAULT_OPTIONS, **{k: v for k, v in (opts or {}).items() if k in DEFAULT_OPTIONS}}
-    o["clips"] = max(1, min(20, int(o["clips"] or 6)))
+    o["clips"] = 0 if o["clips"] in (0, "0", "auto", None, "") else max(1, min(30, int(o["clips"])))
     if o.get("content") not in ("auto", "talk", "gaming"):
         o["content"] = "auto"
     from .reframe import STREAM_TEMPLATES
@@ -86,6 +87,39 @@ def normalize_options(opts: dict | None) -> dict:
     return o
 
 
+def working_llm(provider: str, model: str | None, log=None) -> LLM:
+    """The chosen AI if it answers; otherwise the next provider that does (a rejected or
+    expired key must not silently drop the whole run to rules-only picking)."""
+    from . import providers
+
+    first = LLM(provider, model)
+    if first.provider == "none":
+        return first
+    ok, detail = first.verify()
+    if ok:
+        return first
+    order = [p["id"] for p in providers.public()["providers"] if p["configured"]]
+    order = sorted(order, key=lambda pid: pid != "ollama")    # local first: no key to break
+    for pid in order:
+        if pid == first.provider:
+            continue
+        alt = LLM(pid)
+        if alt.available and alt.verify()[0]:
+            if log:
+                log(f"{first.provider} is not working ({detail}) - using {alt.label} instead. "
+                    f"Fix it in Settings > AI providers.")
+            return alt
+    if log:
+        log(f"{first.provider} is not working ({detail}) and no other AI answered - rules-only picking")
+    return first
+
+
+def auto_clip_count(duration: float) -> int:
+    """How many clips a video is worth: about one per 3.5 minutes (Opus-style), 2-20."""
+    minutes = max(0.0, duration) / 60
+    return int(max(2, min(20, round(minutes / 3.5) + 1)))
+
+
 def edit_from_options(o: dict) -> dict:
     return merge_edit(None, {
         "aspect": o["aspect"],
@@ -94,6 +128,7 @@ def edit_from_options(o: dict) -> dict:
                    **({"cam_size": 0.42} if o.get("stream_template") in ("bubble", "card") else {})},
         "captions": {"enabled": bool(o["captions"]), "preset": o["preset"], "emoji": bool(o["emoji"])},
         "title": {"enabled": bool(o["title"])},
+        "intro": {"enabled": bool(o.get("intro", True))},
         "progress": {"enabled": bool(o["progress"])},
         "zoom": {"enabled": bool(o["zoom"])},
         "cuts": {"silence": bool(o["silence"]), "fillers": bool(o["fillers"]), "removed": []},
@@ -390,7 +425,7 @@ def run(p: Project, source: Path, log=None) -> Project:
                 extract_wav(source, wav)
         mark("ingest", t0)
 
-        llm = LLM(o["provider"], o.get("llm_model"))
+        llm = working_llm(o["provider"], o.get("llm_model"), log)
         with _asr_lock:
             t0 = time.time()
             cached = (p.sentences and p.settings.get("whisper_model") == o["whisper_model"]
@@ -452,7 +487,10 @@ def run(p: Project, source: Path, log=None) -> Project:
             p.settings["content"] = "gaming" if gaming else "talk"
             if gaming:
                 log("game stream detected: using the gaming agent")
-            clips, model = select(p.sentences, audio, topic=o["topic"], k=o["clips"], context=context,
+            k = o["clips"] or auto_clip_count(p.duration)
+            if not o["clips"]:
+                log(f"clip count: auto, {k} clips for {p.duration / 60:.0f} min")
+            clips, model = select(p.sentences, audio, topic=o["topic"], k=k, context=context,
                                   gaming=gaming, language=p.language, duration=p.duration,
                                   weights=settings.scoring_weights(), log=sel_log,
                                   min_len=lo, max_len=hi, llm=llm,
@@ -466,11 +504,13 @@ def run(p: Project, source: Path, log=None) -> Project:
         base_edit = edit_from_options(o)
         for c in clips:
             c.edit = copy.deepcopy(base_edit)
+            if c.skips:            # the AI's cuts inside the clip (loading screens, dead air)
+                c.edit.setdefault("cuts", {})["ranges"] = [list(x) for x in c.skips]
             c.render = {"status": "queued", "progress": 0.0}
         p.clips = clips
         p.settings["selector"] = model
         p.settings["quality"] = {"bar": QUALITY[o["quality"]], "level": o["quality"],
-                                 "kept": len(clips), "asked": o["clips"]}
+                                 "kept": len(clips), "asked": k}
         p.settings["encoder"] = encoder_name()
         save(p)
         log(f"selected {len(clips)} clips via {model}")
@@ -543,7 +583,13 @@ def _track_and_render(p: Project, clip: Clip, log=None) -> None:
             clip.render["message"] = "finding speakers"
             save(p)
             words = [w for s in p.sentences if s.end >= t0 and s.start <= t1 for w in s.words]
-            clip.track = track(src, t0, t1, p.width, p.height, words=words, log=log, offset=offset)
+            game = p.settings.get("content") == "gaming"
+            clip.track = track(src, t0, t1, p.width, p.height, words=words, log=log, offset=offset,
+                               game=game, known_cam=p.settings.get("stream_cam"))
+            sc = clip.track.get("stream_cam") or {}
+            strong = bool(sc.get("rect")) or float(sc.get("share") or 0) >= 0.4
+            if game and strong and not p.settings.get("stream_cam"):
+                p.settings["stream_cam"] = sc       # share the webcam spot with the other clips
             clip.render.pop("message", None)
             save(p)
 

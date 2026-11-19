@@ -6,6 +6,8 @@ several clips in parallel (see pipeline.py). Falls back to x264 / CPU decode aut
 from __future__ import annotations
 
 import functools
+import os
+import shutil
 import re
 import subprocess
 import threading
@@ -148,6 +150,10 @@ def plan(clip: Clip, sentences: list[Sentence], src_w: int, src_h: int) -> dict:
     vertical = oh > ow * 1.1
     if layout == "auto" and trk.get("stream_cam") and vertical and scfg.get("auto", True):
         layout = "gaming"             # a webcam overlay on gameplay for most of the clip
+    if layout == "auto" and trk.get("game"):
+        # game stream without a webcam found: show the whole frame, never follow faces in
+        # the game (that is how a GTA character ends up in a split screen)
+        layout = "gaming" if trk.get("stream_cam") and vertical else "fit"
     if layout == "auto":
         cov = trk.get("coverage")
         if cov is not None and cov < 0.35:
@@ -480,7 +486,13 @@ def build_graph(pl: dict, src_w: int, src_h: int, has_audio: bool, ass_name: str
         graph.append(f"[{cur}][{i}:v]overlay=x='(W-w)/2':y='{ev['y']}-h/2':"
                      f"enable='between(t,{ev['t']:.3f},{ev['end']:.3f})'[{nxt}]")
         cur = nxt
-    graph.append(f"[{cur}]format=yuv420p[v]")
+    fl = pl.get("flash") or ""
+    fades = []
+    if "in" in fl:      # main clip after a hook teaser: open on a white flash
+        fades.append("fade=t=in:st=0:d=0.18:color=white")
+    if "out" in fl:     # hook teaser: end on a white flash
+        fades.append(f"fade=t=out:st={max(0.0, pl['duration'] - 0.14):.3f}:d=0.14:color=white")
+    graph.append(f"[{cur}]{','.join(fades + ['format=yuv420p'])}[v]")
 
     if has_audio:
         a = ["asetpts=PTS-STARTPTS"]
@@ -489,13 +501,67 @@ def build_graph(pl: dict, src_w: int, src_h: int, has_audio: bool, ass_name: str
         if (edit.get("audio") or {}).get("normalize", True):
             a.append("loudnorm=I=-14:TP=-1.5:LRA=11")
         a.append("aresample=48000")
+        if "in" in fl:
+            a.append("afade=t=in:st=0:d=0.05")
+        if "out" in fl:
+            a.append(f"afade=t=out:st={max(0.0, pl['duration'] - 0.08):.3f}:d=0.08")
         graph.append(f"[0:a]{','.join(a)}[a]")
     return ";\n".join(graph)
 
 
+def intro_range(clip: Clip, edit: dict, pl: dict) -> list[float] | None:
+    """The hook teaser to play first, when it is on and makes sense for this cut."""
+    if not (edit.get("intro") or {}).get("enabled") or len(clip.intro or []) != 2:
+        return None
+    h0, h1 = float(clip.intro[0]), float(clip.intro[1])
+    if not (pl["a"] <= h0 < h1 <= pl["b"]) or not 1.2 <= h1 - h0 <= 5.0:
+        return None
+    if h0 - pl["a"] < 1.5 or pl["duration"] < 10:
+        return None                 # the strongest moment already opens the clip
+    return [h0, h1]
+
+
+def _prepend_intro(src: Path, src_w: int, src_h: int, has_audio: bool, clip: Clip,
+                   sentences: list[Sentence], out_dir: Path, video_path: Path,
+                   intro: list[float], offset: float, used: tuple) -> None:
+    """Render the teaser with the same look, then join teaser + clip without re-encoding."""
+    import copy as _copy
+
+    ic = _copy.deepcopy(clip)
+    ic.id, ic.start, ic.end, ic.intro, ic.version = f"{clip.id}_intro", intro[0], intro[1], [], 0
+    ie = _copy.deepcopy(clip.edit or {})
+    ie["intro"] = {"enabled": False}
+    ie["cuts"] = {"silence": False, "fillers": False, "removed": []}
+    ie["start"], ie["end"] = None, None        # the teaser's own window, not the clip's trim
+    ie.setdefault("progress", {})["enabled"] = False
+    ic.edit = ie
+    tmp = out_dir / "_intro"
+    r = render_clip(src, src_w, src_h, has_audio, ic, sentences, tmp, offset=offset, _flash="out")
+    teaser = tmp / r["file"]
+    joined = video_path.with_name(video_path.stem + ".joined.mp4")
+    lst = tmp / "concat.txt"
+    lst.write_text(f"file '{teaser.as_posix()}'" + chr(10) + f"file '{video_path.as_posix()}'" + chr(10),
+                   encoding="utf-8")
+    same = r["encoder"].split("+")[0] == ("nvenc" if used[0] else "x264")
+    if same:
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "concat", "-safe", "0",
+               "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(joined)]
+    else:   # different encoders (GPU fallback): join with a quick re-encode
+        graph = ("[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]" if has_audio
+                 else "[0:v][1:v]concat=n=2:v=1:a=0[v]")
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(teaser), "-i", str(video_path),
+               "-filter_complex", graph, "-map", "[v]"]
+        if has_audio:
+            cmd += ["-map", "[a]", "-c:a", "aac", "-b:a", "192k"]
+        cmd += _video_args(False) + ["-movflags", "+faststart", str(joined)]
+    run(cmd)
+    os.replace(joined, video_path)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 def render_clip(src: str | Path, src_w: int, src_h: int, has_audio: bool, clip: Clip,
                 sentences: list[Sentence], out_dir: Path, log=None, on_progress=None,
-                offset: float = 0.0) -> dict:
+                offset: float = 0.0, _flash: str = "") -> dict:
     """`offset`: absolute source time at the file's 0 (link projects render from pieces)."""
     t_start = time.time()
     out_dir = Path(out_dir).resolve()
@@ -503,6 +569,8 @@ def render_clip(src: str | Path, src_w: int, src_h: int, has_audio: bool, clip: 
     src = Path(src).resolve()
     pl = plan(clip, sentences, src_w, src_h)
     edit = pl["edit"]
+    intro = intro_range(clip, edit, pl) if not _flash else None
+    pl["flash"] = _flash or ("in" if intro else "")
     ver = clip.version + 1
     stem = f"{clip.id}_v{ver}"
     video_path = out_dir / f"{stem}.mp4"
@@ -588,6 +656,13 @@ def render_clip(src: str | Path, src_w: int, src_h: int, has_audio: bool, clip: 
             log(f"render retry ({'nvenc' if g else 'x264'}{' +cuda' if h else ''} failed): "
                 + " | ".join(tail[-3:])[:300])
     fg_path.unlink(missing_ok=True)
+    if used is not None and intro:
+        try:
+            _prepend_intro(src, src_w, src_h, has_audio, clip, sentences, out_dir, video_path,
+                           intro, offset, used)
+        except Exception as e:      # the clip itself is fine: ship it without the teaser
+            if log:
+                log(f"hook teaser skipped: {str(e)[:200]}")
     if used is None:
         raise RenderError("ffmpeg failed:\n" + "\n".join(tail[-15:]))
 

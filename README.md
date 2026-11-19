@@ -67,6 +67,24 @@ Long streams (auto-detected, or Content: gaming) go through the **gaming agent**
    story label), asks again about any it skipped, and drops repeats of the same story;
 4. the viral judge ranks the finalists.
 
+If the streamer talks a lot, the normal talk reader runs too, so stories and rants
+compete with the loud moments. On cloud providers the review runs three batches at a time.
+
+**How many clips:** Auto by default, about one clip per 3.5 minutes (a 1 h 47 min stream gives 20).
+The quality bar removes weak clips, but it never leaves you with fewer than half of what you
+asked for while near-misses (within 12 points) exist.
+
+**Viral score (gaming):** the agent scores each clip out of 100 on five parts, 20 points each:
+hook strength, emotion, shareability, works without the stream, and payoff. That is blended
+60/40 with ClipForge's own score from sound and speech, then the viral judge compares the finalists.
+
+**Cuts:** the agent can cut dull stretches out of a clip (loading screens, menus, silent
+driving). Clips start just before the first word and end ~0.35 s after the last one, so no
+word is chopped.
+
+**Hook intro:** every clip opens with its strongest 2-4 s (the shout, the punchline), then
+a white flash into the full clip. Toggle it per project or per clip.
+
 **Gaming templates** (new project screen, or per clip in the editor): Stacked, Reaction (big face),
 50 / 50, Bubble (round face-cam with a white ring over full gameplay), Card (framed face-cam in a corner)
 and Gameplay only. The context banner moves with the template.

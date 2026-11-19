@@ -31,6 +31,13 @@ export function Home({ presets, health }: { presets: Presets | null; health: Hea
       let saved: Partial<Options> = {};
       try {
         saved = JSON.parse(localStorage.getItem("cf.options") || "{}");
+        // v2: clip count became Auto and the quality bar default changed; old saved
+        // values (a fixed 6 clips, "viral only") would hide that, so reset them once
+        if (localStorage.getItem("cf.options.v") !== "2") {
+          delete saved.clips;
+          delete saved.quality;
+          localStorage.setItem("cf.options.v", "2");
+        }
       } catch {
         /* ignore */
       }

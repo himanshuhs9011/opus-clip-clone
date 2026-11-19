@@ -138,12 +138,20 @@ For EACH candidate decide:
 - title: max 8 words
 - banner: on-screen line, max 12 words: who + what happens + the game, ONE key word in CAPS
 - scores 0-100: hook, retention, emotion, value, quotability
+- viral_score 1-100 = sum of five parts, 1-20 each: hook strength (first 3 s stop the scroll),
+  emotional intensity, shareability (comments, tags, shares), standalone clarity (makes sense
+  without the stream), payoff (a clear reward for watching to the end). 90+ only for moments
+  that would really blow up; most kept moments land 60-85.
+- skip: dull stretches INSIDE the clip to cut out, each at least 2 s: loading screens, menus,
+  silent driving, waiting, reading chat. [] when the clip is tight already. Never cut the payoff.
+- hook_start, hook_end: the 2-4 s inside the clip that grab hardest (the shout, the punchline,
+  the reaction). It is shown first as a teaser.
 - story: 2-4 English words naming the event (e.g. "copyright strike", "first car chase").
   Candidates about the SAME event get the SAME story label; keep only the best one of them.
 Write title and banner in {lang}. Never use Chinese or other unrelated scripts.
 Return STRICT JSON only:
 {{"clips":[{{"id":0,"keep":true,"type":"funny","start":0.0,"end":0.0,"what":"","title":"",
-"banner":"","story":"","hashtags":["#tag"],"scores":{{"hook":0,"retention":0,"emotion":0,"value":0,"quotability":0}}}}]}}"""
+"banner":"","story":"","viral_score":0,"hook_start":0.0,"hook_end":0.0,"skip":[[0.0,0.0]],"hashtags":["#tag"],"scores":{{"hook":0,"retention":0,"emotion":0,"value":0,"quotability":0}}}}]}}"""
 
 AGENT_SCHEMA = {
     "type": "object",
@@ -155,6 +163,9 @@ AGENT_SCHEMA = {
             "start": {"type": "number"}, "end": {"type": "number"},
             "what": {"type": "string"}, "title": {"type": "string"}, "banner": {"type": "string"},
             "story": {"type": "string"},
+            "viral_score": {"type": "integer"},
+            "hook_start": {"type": "number"}, "hook_end": {"type": "number"},
+            "skip": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
             "hashtags": {"type": "array", "items": {"type": "string"}},
             "scores": {"type": "object", "properties": {k: {"type": "integer"} for k in
                        ("hook", "retention", "emotion", "value", "quotability")}},
@@ -175,6 +186,10 @@ def _snap(sentences: list[Sentence], a: float, b: float, lo: float, hi: float) -
         if w.start < b <= w.end:
             b = w.end + 0.25
             break
+    inside = [w for w in words if a <= w.start < b]
+    if inside:
+        a = min(a, inside[0].start - 0.12)
+        b = max(b, inside[-1].end + 0.35)        # let the last word land before the cut
     return max(lo, a), min(hi, b)
 
 
@@ -217,12 +232,12 @@ def _overview_text(sentences: list[Sentence], score: np.ndarray, budget: int) ->
 
 
 def overview(sentences: list[Sentence], score: np.ndarray, llm: LLM, context: str, lang: str,
-             log=None) -> dict:
+             log=None, n_moments: int = 12) -> dict:
     """Step 0: read the whole stream once (game, streamer, storyline, the AI's own moments)."""
     budget = max(5000, llm.context_chars - 3000)
     user = ((f"STREAM TITLE: {context}\n\n" if context else "")
             + "TRANSCRIPT:\n" + _overview_text(sentences, score, budget)
-            + "\n\nList up to 12 moments.")
+            + f"\n\nList up to {n_moments} moments, spread over the whole stream.")
     if log:
         log("gaming agent: reading the whole stream")
     try:
@@ -274,20 +289,65 @@ def common_words(picks: list[dict]) -> set[str]:
     return {w for w, n in cnt.items() if n >= max(3, len(picks) * 0.4)}
 
 
+def _num(v) -> float | None:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    f = f * 10 if 0 < f <= 10 else f
+    return max(1.0, min(100.0, f)) if f > 0 else None
+
+
+def _skips(r: dict | None, a: float, b: float) -> list[list[float]]:
+    """The agent's cuts inside a clip, kept only when they are safe: inside the clip, 1.5 s+,
+    away from its first 3 s and last 2 s, and at most 40 % of it in total."""
+    out: list[list[float]] = []
+    for x in (r or {}).get("skip") or []:
+        try:
+            s, e = float(x[0]), float(x[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        s, e = max(s, a + 3.0), min(e, b - 2.0)
+        if e - s >= 1.5 and all(e <= o[0] or s >= o[1] for o in out):
+            out.append([round(s, 3), round(e, 3)])
+    out.sort()
+    while out and sum(e - s for s, e in out) > 0.4 * (b - a):
+        out.pop(max(range(len(out)), key=lambda i: out[i][1] - out[i][0]))
+    return out
+
+
+def _intro(r: dict | None, a: float, b: float, score: np.ndarray) -> list[float]:
+    """Hook teaser range: the agent's pick, else the loudest 3 s of the clip."""
+    try:
+        h0, h1 = float((r or {}).get("hook_start")), float((r or {}).get("hook_end"))
+        if a <= h0 < h1 <= b and 1.2 <= h1 - h0 <= 5.0:
+            return [round(h0, 3), round(h1, 3)]
+    except (TypeError, ValueError):
+        pass
+    lo, hi = int(a) + 1, max(int(a) + 2, int(b) - 1)
+    seg = score[lo:hi]
+    if seg.size == 0:
+        return []
+    t = lo + int(np.argmax(seg))
+    h0 = max(a, t - 1.6)
+    return [round(h0, 3), round(min(b, h0 + 3.2), 3)]
+
+
 def agent_select(sentences: list[Sentence], audio: AudioFeatures, duration: float, k: int,
                  llm: LLM | None, context: str = "", language: str = "", log=None,
                  min_len: float = 12.0, max_len: float = 60.0) -> list[dict]:
     """Returns picks shaped like highlights.llm_select output (plus 'gaming': True)."""
     score = hype_map(audio, sentences, duration)
-    peaks = pick_peaks(score, max(k * 4, 12))
+    peaks = pick_peaks(score, max(12, min(k * 3, 60)))
     if log:
         log(f"gaming agent: {len(peaks)} hype peaks found in {duration / 60:.0f} min")
     use_llm = llm is not None and llm.available
     lang = LANG.get((language or "en")[:2], f"the transcript's language ({language})")
 
-    ov: dict = overview(sentences, score, llm, context, lang, log) if use_llm else {}
+    n_moments = max(12, min(30, k + 6))
+    ov: dict = overview(sentences, score, llm, context, lang, log, n_moments) if use_llm else {}
     times = [(float(t), "peak") for t in peaks]
-    for m in (ov.get("moments") or [])[:12]:
+    for m in (ov.get("moments") or [])[:n_moments]:
         try:
             t = float(m.get("t"))
         except (TypeError, ValueError, AttributeError):
@@ -341,15 +401,24 @@ def agent_select(sentences: list[Sentence], audio: AudioFeatures, duration: floa
                     reviewed[i] = item
             return True
 
-        failed = 0
-        for bi in range(0, len(cands), batch):
-            chunk = cands[bi : bi + batch]
+        chunks = [cands[bi : bi + batch] for bi in range(0, len(cands), batch)]
+        if llm.provider == "ollama":
+            failed = 0
+            for ci, chunk in enumerate(chunks):
+                if log:
+                    log(f"gaming agent reviewing batch {ci + 1} of {len(chunks)}")
+                if not review(chunk):
+                    failed += 1
+                    if failed >= 2 and not reviewed:
+                        break                      # the model is down, not just one bad batch
+        else:
+            # cloud models: three batches at a time (well inside free-tier rate limits)
+            from concurrent.futures import ThreadPoolExecutor
+
             if log:
-                log(f"gaming agent reviewing candidates {bi + 1}-{bi + len(chunk)} of {len(cands)}")
-            if not review(chunk):
-                failed += 1
-                if failed >= 2 and not reviewed:
-                    break                          # the model is down, not just one bad batch
+                log(f"gaming agent reviewing {len(cands)} candidates in {len(chunks)} batches")
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                list(pool.map(review, chunks))
         missing = [c for c in cands if c["id"] not in reviewed]
         if reviewed and missing:
             if log:
@@ -395,6 +464,9 @@ def agent_select(sentences: list[Sentence], audio: AudioFeatures, duration: floa
             "scores": _normalize_scores((r or {}).get("scores") or {}),
             "risks": [], "gaming": True, "hype": c["hype"], "kind": (r or {}).get("type", "hype"),
             "story": str((r or {}).get("story") or "").strip().lower(),
+            "viral_score": _num((r or {}).get("viral_score")),
+            "intro": _intro(r, a, b, score),
+            "skips": _skips(r, a, b),
         })
     if log:
         log(f"gaming agent kept {len(picks)} of {len(cands)} candidates")

@@ -70,9 +70,9 @@ export function OptionsForm({
         <div className="opt">
           <span className="field-label">Clips <em className="hint-inline">length picked by AI</em></span>
           <div className="stepper">
-            <button type="button" onClick={() => set("clips", Math.max(1, value.clips - 1))}>−</button>
-            <b>{value.clips}</b>
-            <button type="button" onClick={() => set("clips", Math.min(20, value.clips + 1))}>+</button>
+            <button type="button" title="Fewer (1 = one clip, below that = Auto)" onClick={() => set("clips", Math.max(0, value.clips - 1))}>−</button>
+            <b title={value.clips ? "" : "About one clip per 3.5 minutes of video, up to 20"}>{value.clips || "Auto"}</b>
+            <button type="button" onClick={() => set("clips", value.clips ? Math.min(30, value.clips + 1) : 6)}>+</button>
           </div>
         </div>
         <div className="opt">
@@ -191,6 +191,7 @@ export function OptionsForm({
         {([
           ["zoom", "Auto zoom"],
           ["title", "Hook title"],
+          ["intro", "Hook intro"],
           ["emoji", "Emoji"],
           ["progress", "Progress bar"],
           ["silence", "Remove silences"],

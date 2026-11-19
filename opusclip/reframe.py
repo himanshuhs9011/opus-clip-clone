@@ -21,7 +21,7 @@ import numpy as np
 from .config import settings
 from .probe import NO_WINDOW
 
-TRACK_VERSION = 8
+TRACK_VERSION = 11
 DET_NAME = "face_detection_yunet_2023mar.onnx"
 REC_NAME = "face_recognition_sface_2021dec.onnx"
 ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -252,8 +252,10 @@ def _runs_min(seq: list, min_len: int, breaks: set[int]) -> list:
 # --------------------------------------------------------------------------
 def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
           words: list | None = None, sample_fps: float | None = None, log=None,
-          offset: float = 0.0) -> dict:
-    """Analyse faces/speakers in [start, end] (absolute seconds). Times in the result are
+          offset: float = 0.0, game: bool = False, known_cam: dict | None = None) -> dict:
+    """`game`: a game stream - faces in the game are not people to follow, and the webcam is
+    looked for with looser rules. `known_cam`: the stream's webcam found in another clip.
+    Analyse faces/speakers in [start, end] (absolute seconds). Times in the result are
     relative to `start` (t0). `offset` = absolute time of the file's 0 (downloaded pieces)."""
     from .speakers import speaker_at
 
@@ -262,13 +264,15 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
     key_i = "cx" if axis == "x" else "cy"
     base = {"v": TRACK_VERSION, "t0": round(start, 3), "t1": round(end, 3), "axis": axis,
             "coverage": 0.0, "scenes": 1, "keys": [[0.0, 0.5]], "faces": 0, "people": 0,
-            "speaker_map": {}, "split": [], "switches": 0}
+            "speaker_map": {}, "split": [], "switches": 0, "game": bool(game)}
     fx = _Faces()
     words = sorted(words or [], key=lambda w: w.start)
 
     times: list[float] = []
     dets: list[list[dict]] = []
     cams: list[dict | None] = []     # largest face of any size per sample (face-cam finder)
+    smalls: list[list[dict]] = []      # every small face per sample (game streams: the webcam
+                                       # face is often smaller than the game's characters)
     edge_x = edge_y = None            # edges averaged over time: overlay borders stay, gameplay blurs out
     scene_of: list[int] = []
     prev_hist = prev_thumb = None
@@ -294,6 +298,8 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
         found = fx.detect(frame)
         big = max(found, key=lambda f: f["h"], default=None)
         cams.append({"cx": big["cx"], "cy": big["cy"], "h": big["h"], "w": big["w"]} if big else None)
+        smalls.append([{"cx": f["cx"], "cy": f["cy"], "h": f["h"], "w": f["w"]}
+                       for f in found if f["h"] < 0.16])
         faces = [f for f in found if f["h"] >= 0.07]   # tiny ones are insets / audience
         # link to face tracks from the previous sample (same scene)
         live = [tr for tr in tracks if tr["scene"] == scene and tr["last_i"] == i - 1]
@@ -335,11 +341,27 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
             log("could not read frames for tracking - centre crop")
         return base
     n = len(times)
-    stream_cam = _stream_cam(cams, dets, n)
-    if stream_cam and edge_x is not None:
-        rect = _cam_rect(edge_x / n, edge_y / n, stream_cam)
-        if rect:
-            stream_cam["rect"] = rect
+    stream_cam = _game_cam(smalls, n) if game else None
+    stream_cam = stream_cam or _stream_cam(cams, dets, n)
+    if game and not stream_cam and known_cam:
+        stream_cam = dict(known_cam)        # same stream, same webcam spot
+    rect_cache: dict = {}
+
+    def with_rect(cam: dict | None) -> dict | None:
+        """Attach the webcam rectangle (from time-averaged edges) to a face-cam position."""
+        if not cam or edge_x is None or cam.get("rect"):
+            return cam
+        key = (round(cam["cx"], 2), round(cam["cy"], 2))
+        if key not in rect_cache:
+            rect_cache[key] = _cam_rect(edge_x / n, edge_y / n, cam)
+        if rect_cache[key]:
+            cam = {**cam, "rect": rect_cache[key]}
+        return cam
+
+    stream_cam = with_rect(stream_cam)
+    if (stream_cam and known_cam and known_cam.get("rect") and not stream_cam.get("rect")
+            and abs(stream_cam["cx"] - known_cam["cx"]) < 0.05 and abs(stream_cam["cy"] - known_cam["cy"]) < 0.07):
+        stream_cam = {**stream_cam, "rect": known_cam["rect"]}     # same overlay, box found elsewhere
     base["stream_cam"] = stream_cam
     if stream_cam and log:
         log(f"face-cam overlay found at x={stream_cam['cx']:.2f} y={stream_cam['cy']:.2f}")
@@ -502,7 +524,7 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
         small = bool(with_faces) and float(np.median(with_faces)) < 0.12   # face-cam inset only
         if len(ids) >= 3 and (len(with_faces) < 0.25 * len(ids) or small):
             seen = [cams[i] for i in ids if cams[i] and cams[i]["h"] < 0.16]
-            cam = _cam_box(seen) if len(seen) >= 0.5 * len(ids) else None
+            cam = with_rect(_cam_box(seen)) if len(seen) >= 0.5 * len(ids) else None
             blank.append({"t0": round(float(ts[ids[0]]), 3),
                           "t1": round(float(ts[ids[-1]] + 1.0 / fps), 3), "cam": cam})
 
@@ -517,19 +539,58 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
             "main_face": _cam_box([c for c in cams if c])}
 
 
+def _game_cam(smalls: list[list[dict]], n: int) -> dict | None:
+    """Game stream webcam: the group of small faces that sits in the same spot near an edge
+    or corner in the most frames. Game characters move around and come and go; the
+    streamer's overlay stays put."""
+    if n == 0:
+        return None
+    groups: list[dict] = []
+    for i, faces in enumerate(smalls):
+        for f in faces:
+            for g in groups:
+                if abs(f["cx"] - g["cx"]) < 0.05 and abs(f["cy"] - g["cy"]) < 0.07:
+                    g["items"].append(f)
+                    g["frames"].add(i)
+                    k = len(g["items"])
+                    g["cx"] += (f["cx"] - g["cx"]) / k
+                    g["cy"] += (f["cy"] - g["cy"]) / k
+                    break
+            else:
+                groups.append({"cx": f["cx"], "cy": f["cy"], "items": [f], "frames": {i}})
+    best, best_share = None, 0.0
+    for g in groups:
+        share = len(g["frames"]) / n
+        edge = g["cx"] < 0.34 or g["cx"] > 0.66 or g["cy"] < 0.3 or g["cy"] > 0.72
+        hs = [f["h"] for f in g["items"]]
+        steady = float(np.std(hs)) < 0.35 * float(np.median(hs))      # same size = same overlay
+        if edge and steady and share >= 0.2 and share > best_share:
+            best, best_share = g, share
+    if best is None:
+        return None
+    box = _cam_box(best["items"])
+    box["share"] = round(best_share, 3)
+    return box
+
+
 def _stream_cam(cams: list, dets: list, n: int) -> dict | None:
     """A game stream: a small face that stays in one place (the webcam overlay) for much of
     the clip, while full-size faces are rare. Judged over the whole clip, because fast
     gameplay makes every second look like a new scene."""
     small = [c for c in cams if c and c["h"] < 0.16]
-    if n == 0 or len(small) < 0.3 * n:
-        return None
-    big_share = sum(1 for d in dets if d) / n
-    if big_share >= 0.3:
+    if n == 0 or len(small) < 0.25 * n:
         return None
     med = _cam_box(small)
     near = [c for c in small if abs(c["cx"] - med["cx"]) < 0.06 and abs(c["cy"] - med["cy"]) < 0.08]
-    return _cam_box(near) if len(near) >= 0.25 * n else None
+    share = len(near) / n
+    if share >= 0.4:
+        # a small face parked in one spot for much of the clip is a webcam overlay, even
+        # when the game shows realistic faces (GTA cutscenes) that look like "big" people
+        return _cam_box(near)
+    big_share = sum(1 for d in dets if d) / n
+    if big_share >= 0.3:
+        return None
+    return _cam_box(near) if share >= 0.25 else None
 
 
 def _cam_rect(ex: np.ndarray, ey: np.ndarray, cam: dict) -> dict | None:
@@ -653,8 +714,10 @@ OVERLAY_TEMPLATES = ("bubble", "card", "gameplay")    # gameplay fills the frame
 def _cam_crop(src_w: int, src_h: int, cam: dict, ar: float, zoom: float) -> list[int]:
     """Source crop of the face-cam at aspect `ar` (w/h), inside the webcam box when known."""
     rect = cam.get("rect")
-    # wide framing (head, shoulders, chair): the face is about a quarter of the panel height
-    ch = min(src_h, max(cam["h"] * src_h * 4.2 / zoom, src_h * 0.1))
+    # wide framing (head, shoulders, chair) inside a known webcam box; without the box, stay
+    # tight on the face: a webcam overlay is small and whatever surrounds it is chat or game
+    wide = 4.2 if rect else (2.6 if cam["h"] < 0.16 else 4.2)
+    ch = min(src_h, max(cam["h"] * src_h * wide / zoom, src_h * 0.1))
     cw = ch * ar
     if cw > src_w:
         cw, ch = src_w, src_w / ar
