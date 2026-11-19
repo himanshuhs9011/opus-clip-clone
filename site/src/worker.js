@@ -1,7 +1,10 @@
 // ClipForge site: static pages from ./public, plus /download which streams the newest
 // ClipForge-Setup.exe from the GitHub release so visitors download it straight from this site.
+// Pinned to the current release (a new URL also means a fresh cache entry). For a new
+// release, change RELEASE_TAG and redeploy.
+const RELEASE_TAG = "latest0.0.1";
 const RELEASE_FILE =
-  "https://github.com/himanshuhs9011/opus-clip-clone/releases/latest/download/ClipForge-Setup.exe";
+  `https://github.com/himanshuhs9011/opus-clip-clone/releases/download/${RELEASE_TAG}/ClipForge-Setup.exe`;
 
 export default {
   async fetch(request, env) {
