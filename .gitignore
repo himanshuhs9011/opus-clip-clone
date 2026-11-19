@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.env
+uploads/
+output/
+assets/emoji/
+models/*.onnx
+frontend/node_modules/
+frontend/dist/
+dist/
+installer/build/
+fixtures/*.mp4
+fixtures/*.wav
+*.log
+clipforge.ico
