@@ -1,6 +1,6 @@
 # ClipForge — a local Opus-Clip-style engine
 
-**[⬇ Download ClipForge for Windows](https://github.com/himanshuhs9011/opus-clip-clone/releases/latest/download/ClipForge-Setup.exe)**:
+**Website: [clipforge.raglib-site.workers.dev](https://clipforge.raglib-site.workers.dev)** · **[⬇ Download ClipForge for Windows](https://clipforge.raglib-site.workers.dev/download)**:
 run it, click Next a few times, then Finish. It installs everything it needs by itself.
 
 Long video in → ranked, captioned, vertical shorts out. Runs on your own PC (Whisper + Ollama +
@@ -77,6 +77,17 @@ powershell -ExecutionPolicy Bypass -File installer\build.ps1
 
 Then publish `dist\ClipForge-Setup.exe` as a GitHub Release asset with exactly that file name,
 so the download link above always serves the newest version.
+
+## Website
+
+The download site lives in `site/` and runs on Cloudflare Workers:
+
+- `site/public/index.html`: the page
+- `site/src/worker.js`: serves `/download`, which streams the newest `ClipForge-Setup.exe`
+  from the GitHub release, so the button downloads straight from the site
+- `site/wrangler.jsonc`: Cloudflare config
+
+Publish changes with `npx wrangler deploy` from the `site` folder.
 
 ## Setup (developers)
 

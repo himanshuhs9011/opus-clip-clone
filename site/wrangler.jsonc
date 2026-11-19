@@ -1,0 +1,12 @@
+{
+  "$schema": "https://unpkg.com/wrangler@4/config-schema.json",
+  // ClipForge download site: static pages + a /download route that streams the installer
+  "name": "clipforge",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-11-19",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/download", "/ClipForge-Setup.exe"]
+  }
+}
