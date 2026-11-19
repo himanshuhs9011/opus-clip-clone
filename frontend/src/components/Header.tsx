@@ -29,7 +29,7 @@ export function Header({ health, onSettings }: { health: Health | null; onSettin
           <>
             <span className="chip" title={st?.detail ?? ""}>
               <span className={`dot ${llmOk ? "ok" : "warn"}`} />
-              {PROVIDER_LABEL[prov] ?? prov}
+              {st?.name ?? PROVIDER_LABEL[prov] ?? prov}
               {prov !== "none" && st?.model ? <em>{st.model}</em> : null}
             </span>
             <span className="chip" title="Video encoder">

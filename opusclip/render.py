@@ -184,22 +184,26 @@ def plan(clip: Clip, sentences: list[Sentence], src_w: int, src_h: int) -> dict:
     split_cover = sum(sc["t1"] - sc["t0"] for sc in split) / max(0.1, b - a)
     stream_cover = sum(e - s for s, e in stream_ranges) / max(0.1, b - a)
     seam = None                   # where the two panels meet (fraction of height)
+    overlay = bool(stream and stream.get("cam_h") == 0)      # bubble / card / gameplay templates
     if split_cover > 0.5:
         seam = 0.5
-    elif stream and stream_cover > 0.5:
+    elif stream and stream_cover > 0.5 and not overlay:
         seam = round(stream["cam_h"] / oh if stream["cam_pos"] == "top" else 1 - stream["cam_h"] / oh, 3)
 
     # title: a context banner on the seam (gaming / split), or a short hook at the top
     tcfg = edit.get("title") or {}
     mode = tcfg.get("mode") or "auto"
     if mode == "auto":
-        mode = "banner" if seam is not None else "hook"
+        mode = "banner" if (seam is not None or overlay) else "hook"
     banner_text = (tcfg.get("text") or clip.banner or clip.title or "").strip()
+    banner_y = seam if seam is not None else (stream["banner_y"] if overlay else 0.16)
     title = {"mode": mode, "enabled": bool(tcfg.get("enabled")) and bool(banner_text),
              "text": banner_text if mode == "banner" else (tcfg.get("text") or clip.title or "").strip(),
-             "y": seam if (mode == "banner" and seam is not None) else (0.16 if mode == "banner" else None),
+             "y": banner_y if mode == "banner" else None,
              "seconds": float(tcfg.get("seconds") or 3.5)}
 
+    if overlay and abs(pos - 0.70) < 1e-6 and stream.get("corner") in ("bl", "br"):
+        edit["captions"]["position"] = 0.36        # the cam sits where captions usually go
     if abs(pos - 0.70) < 1e-6 and seam is not None:   # default caption position
         if title["enabled"] and mode == "banner":
             # the banner owns the seam: captions go into the gameplay / lower panel
@@ -321,8 +325,54 @@ def build_graph(pl: dict, src_w: int, src_h: int, has_audio: bool, ass_name: str
     stream = pl.get("stream")
     stream_ranges = pl.get("stream_ranges") or []
 
+    def overlay_branch(src: str, out: str) -> None:
+        """Gameplay fills the frame; the face-cam floats on top (bubble / card) or is left out."""
+        gx, gy, gw, gh = stream["game_crop"]
+        tpl = stream.get("template")
+        inset = stream.get("inset") if tpl != "gameplay" else None
+        sel = select + "," if select else ""
+        graph.append(f"{src}{sel}split={2 if inset else 1}" + ("[o1][o2]" if inset else "[o1]"))
+        if stream["game"] == "fit":
+            bw, bh = max(2, ow // 8 // 2 * 2), max(2, oh // 8 // 2 * 2)
+            graph.append("[o1]split=2[o3][o4]")
+            graph.append(f"[o3]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
+                         f"boxblur=6:2,scale={ow}:{oh}:flags=bilinear,eq=brightness=-0.07[obg]")
+            graph.append(f"[o4]scale={ow}:{oh}:force_original_aspect_ratio=decrease:flags=lanczos[ofg]")
+            graph.append("[obg][ofg]overlay=(W-w)/2:(H-h)/2,setsar=1" + ("[ogame]" if inset else out))
+        else:
+            graph.append(f"[o1]crop={gw}:{gh}:{gx}:{gy},scale={ow}:{oh}:flags=lanczos,setsar=1"
+                         + ("[ogame]" if inset else out))
+        if not inset:
+            return
+        ix, iy, iw, ih = inset
+        cx, cy, cw2, ch2 = stream["cam_crop"]
+        ring = max(4, iw // 60 * 2)                 # white border, even
+        inner_w, inner_h = iw - 2 * ring, ih - 2 * ring
+        graph.append(f"[o2]crop={cw2}:{ch2}:{cx}:{cy},scale={inner_w}:{inner_h}:flags=lanczos,setsar=1[ocam0]")
+        if tpl == "bubble":
+            # circular alpha mask made once (1 frame, looped), white disc behind it = the ring
+            circle = "255*lte(hypot(X-W/2+0.5\\,Y-H/2+0.5)\\,W/2-0.5)"
+            graph.append(f"color=c=black:s={inner_w}x{inner_h}:r={fps}:d=0.1,format=gray,"
+                         f"geq=lum='{circle}',trim=end_frame=1,loop=loop=-1:size=1,setpts=N/{fps}/TB[omask]")
+            graph.append("[ocam0]format=yuva420p[ocamy]")
+            graph.append("[ocamy][omask]alphamerge[ocam]")
+            graph.append(f"color=c=white:s={iw}x{ih}:r={fps}:d=0.1,format=yuva420p,"
+                         f"geq=lum=255:cb=128:cr=128:a='{circle}',trim=end_frame=1,"
+                         f"loop=loop=-1:size=1,setpts=N/{fps}/TB[oring]")
+            graph.append(f"[ogame][oring]overlay={ix}:{iy}:shortest=1[ogr]")
+            graph.append(f"[ogr][ocam]overlay={ix + ring}:{iy + ring}:shortest=1,setsar=1{out}")
+        else:
+            # card: white frame with a soft dark shadow line under it
+            graph.append(f"[ocam0]pad={iw}:{ih}:{ring}:{ring}:color=white[ocard]")
+            graph.append(f"[ogame]drawbox=x={ix + ring}:y={iy + ih}:w={iw - ring}:h={ring * 2}:"
+                         f"color=black@0.45:t=fill[ogs]")
+            graph.append(f"[ogs][ocard]overlay={ix}:{iy},setsar=1{out}")
+
     def stream_branch(src: str, out: str) -> None:
         """Gaming layout: face-cam panel stacked with the gameplay panel."""
+        if stream.get("cam_h") == 0:
+            overlay_branch(src, out)
+            return
         cx, cy, cw2, ch2 = stream["cam_crop"]
         gx, gy, gw, gh = stream["game_crop"]
         cam_h, game_h = stream["cam_h"], stream["game_h"]

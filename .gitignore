@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .env
+providers.json
+providers.tmp
 uploads/
 output/
 assets/emoji/

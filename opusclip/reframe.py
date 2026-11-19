@@ -646,14 +646,12 @@ def blank_for(trk: dict, a: float, b: float) -> list[list[float]]:
     return out
 
 
-def stream_geometry(src_w: int, src_h: int, out_w: int, out_h: int, cam: dict, cfg: dict) -> dict:
-    """Gaming layout: a face-cam panel (top or bottom) and a gameplay panel, as source crops."""
-    frac = min(0.55, max(0.25, float(cfg.get("cam_size") or 0.48)))
-    cam_h = _even(out_h * frac)
-    game_h = out_h - cam_h
-    # face-cam: head and shoulders, face a little above centre
-    ar = out_w / cam_h
-    zoom = min(2.0, max(0.5, float(cfg.get("cam_zoom") or 1.0)))   # >1 = tighter on the face
+STREAM_TEMPLATES = ("stack", "reaction", "even", "bubble", "card", "gameplay")
+OVERLAY_TEMPLATES = ("bubble", "card", "gameplay")    # gameplay fills the frame, cam floats on top
+
+
+def _cam_crop(src_w: int, src_h: int, cam: dict, ar: float, zoom: float) -> list[int]:
+    """Source crop of the face-cam at aspect `ar` (w/h), inside the webcam box when known."""
     rect = cam.get("rect")
     # wide framing (head, shoulders, chair): the face is about a quarter of the panel height
     ch = min(src_h, max(cam["h"] * src_h * 4.2 / zoom, src_h * 0.1))
@@ -664,7 +662,7 @@ def stream_geometry(src_w: int, src_h: int, out_w: int, out_h: int, cam: dict, c
     cx = min(max(cam["cx"] * src_w - cw / 2, 0), src_w - cw)
     cy = min(max(cam["cy"] * src_h - ch * 0.38, 0), src_h - ch)   # face in the upper third
     if rect:
-        # crop inside the webcam box only, so no gameplay leaks into the face-cam panel
+        # crop inside the webcam box only, so no gameplay leaks into the face-cam
         rx0, ry0 = rect["x0"] * src_w, rect["y0"] * src_h
         rw, rh = (rect["x1"] - rect["x0"]) * src_w, (rect["y1"] - rect["y0"]) * src_h
         if rw / rh > ar:
@@ -673,18 +671,77 @@ def stream_geometry(src_w: int, src_h: int, out_w: int, out_h: int, cam: dict, c
             cw2, ch2 = rw / zoom, rw / zoom / ar
         cw, ch = _even(min(cw2, rw)), _even(min(ch2, rh))
         cx = min(max(cam["cx"] * src_w - cw / 2, rx0), rx0 + rw - cw)
-        cy = min(max(cam["cy"] * src_h - ch * 0.38, ry0), ry0 + rh - ch)
-    # gameplay: centre crop of the frame (fill) or the whole frame (fit)
-    gar = out_w / game_h
+        cy = min(max(cam["cy"] * src_h - ch * (0.45 if ar <= 1.2 else 0.38), ry0), ry0 + rh - ch)
+    return [int(cx), int(cy), cw, ch]
+
+
+def _game_crop(src_w: int, src_h: int, gar: float, cam: dict | None = None,
+               avoid_cam: bool = False) -> list[int]:
+    """Gameplay crop at aspect `gar`. For a full-height vertical crop, slide it away from the
+    webcam box so the streamer does not appear twice (the cam is shown separately)."""
     gh = src_h
     gw = gh * gar
     if gw > src_w:
         gw, gh = src_w, src_w / gar
     gw, gh = _even(gw), _even(gh)
     gx, gy = (src_w - gw) / 2, (src_h - gh) / 2
-    return {"cam_pos": "bottom" if cfg.get("cam") == "bottom" else "top",
+    rect = (cam or {}).get("rect")
+    if avoid_cam and rect and gw < src_w:
+        rx0, rx1 = rect["x0"] * src_w, rect["x1"] * src_w
+        if gx < rx1 and gx + gw > rx0:                    # centre crop overlaps the webcam
+            left, right = rx0 - gw, rx1                   # end just before / start just after it
+            if left >= 0 and (right + gw > src_w or abs(left - gx) <= abs(right - gx)):
+                gx = left
+            elif right + gw <= src_w:
+                gx = right
+            gx = min(max(gx, 0), src_w - gw)
+    return [int(gx), int(gy), gw, gh]
+
+
+def stream_geometry(src_w: int, src_h: int, out_w: int, out_h: int, cam: dict, cfg: dict) -> dict:
+    """Gaming layout as source crops. Templates:
+    stack     face-cam panel (top/bottom) over gameplay, cam_size of the height
+    reaction  the same with a big face panel (60 %)
+    even      50/50
+    bubble    gameplay fills the frame, round face-cam with a white ring in a corner
+    card      gameplay fills the frame, framed face-cam card in a corner
+    gameplay  gameplay only, no cam
+    """
+    tpl = cfg.get("template") if cfg.get("template") in STREAM_TEMPLATES else "stack"
+    zoom = min(2.0, max(0.5, float(cfg.get("cam_zoom") or 1.0)))   # >1 = tighter on the face
+    if tpl in OVERLAY_TEMPLATES:
+        corner = cfg.get("corner") if cfg.get("corner") in ("tl", "tr", "bl", "br") else "tl"
+        game_crop = _game_crop(src_w, src_h, out_w / out_h, cam, avoid_cam=True)
+        out = {"template": tpl, "cam_pos": "top", "cam_h": 0, "game_h": out_h, "game": "fill",
+               "game_crop": game_crop, "corner": corner, "inset": None, "cam_crop": None}
+        if cfg.get("game") == "fit":
+            out["game"] = "fit"
+        if tpl == "gameplay":
+            out["banner_y"] = 0.15
+            return out
+        size = min(0.6, max(0.25, float(cfg.get("cam_size") or 0.42)))
+        margin = _even(out_w * 0.045)
+        iw = _even(out_w * size)
+        ih = iw if tpl == "bubble" else _even(iw * 0.75)
+        ix = margin if corner in ("tl", "bl") else out_w - iw - margin
+        iy = _even(out_h * 0.075) if corner in ("tl", "tr") else out_h - ih - _even(out_h * 0.2)
+        out["inset"] = [ix, iy, iw, ih]
+        out["cam_crop"] = _cam_crop(src_w, src_h, cam, iw / ih, zoom)
+        # banner sits just under a top inset (or near the top when the inset is at the bottom)
+        out["banner_y"] = round(min(0.5, (iy + ih) / out_h + 0.07), 3) if corner in ("tl", "tr") else 0.15
+        return out
+
+    default = {"reaction": 0.6, "even": 0.5}.get(tpl, 0.48)
+    frac = default if tpl in ("reaction", "even") else float(cfg.get("cam_size") or default)
+    frac = min(0.65, max(0.25, frac))
+    cam_h = _even(out_h * frac)
+    game_h = out_h - cam_h
+    # face-cam: head and shoulders, face a little above centre
+    ar = out_w / cam_h
+    return {"template": tpl, "cam_pos": "bottom" if cfg.get("cam") == "bottom" else "top",
             "cam_h": cam_h, "game_h": game_h, "game": "fit" if cfg.get("game") == "fit" else "fill",
-            "cam_crop": [int(cx), int(cy), cw, ch], "game_crop": [int(gx), int(gy), gw, gh]}
+            "cam_crop": _cam_crop(src_w, src_h, cam, ar, zoom),
+            "game_crop": _game_crop(src_w, src_h, out_w / game_h, cam, avoid_cam=True), "inset": None}
 
 
 def split_crop(src_w: int, src_h: int, out_w: int, half_h: int, face_h: float) -> tuple[int, int]:

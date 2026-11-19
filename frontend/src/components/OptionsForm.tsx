@@ -1,4 +1,5 @@
 import type { CaptionPreset, Health, Options, Presets } from "../api";
+import { STREAM_TEMPLATES, TemplateArt } from "./Inspector";
 
 const ASPECTS: [Options["aspect"], string][] = [
   ["9:16", "9:16"],
@@ -118,8 +119,7 @@ export function OptionsForm({
           <span className="field-label">AI clip finder</span>
           <div className="seg">
             {[
-              ["ollama", "Ollama (local)"],
-              ["openrouter", "OpenRouter"],
+              ...Object.entries(prov).map(([id, p]) => [id, id === "ollama" ? "Ollama (local)" : p.name ?? id]),
               ["none", "Rules only"],
             ].map(([id, label]) => (
               <button
@@ -146,6 +146,27 @@ export function OptionsForm({
           </div>
         </div>
       </div>
+
+      {(value.layout === "auto" || value.layout === "gaming") && (
+        <div className="opt">
+          <span className="field-label">
+            Gaming template <em className="hint-inline">used when a face-cam over gameplay is found</em>
+          </span>
+          <div className="swatches">
+            {STREAM_TEMPLATES.map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                className={`tpl ${(value.stream_template ?? "stack") === id ? "sel" : ""}`}
+                onClick={() => set("stream_template", id)}
+              >
+                <TemplateArt t={id} />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="opt-row">
         <label className="opt grow">

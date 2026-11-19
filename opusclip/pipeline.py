@@ -38,6 +38,7 @@ DEFAULT_OPTIONS: dict = {
     "clips": 6,
     "length": "ai",
     "quality": "good",
+    "content": "auto",          # auto | talk | gaming (gaming = hype-based agent for streams)
     "topic": "",
     "provider": None,          # None = settings.llm_provider
     "llm_model": None,
@@ -47,6 +48,7 @@ DEFAULT_OPTIONS: dict = {
     "captions": True,
     "aspect": "9:16",
     "layout": "auto",
+    "stream_template": "stack",   # gaming template: stack | reaction | even | bubble | card | gameplay
     "zoom": True,
     "title": True,
     "emoji": True,
@@ -66,11 +68,20 @@ _job_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="job")
 def normalize_options(opts: dict | None) -> dict:
     o = {**DEFAULT_OPTIONS, **{k: v for k, v in (opts or {}).items() if k in DEFAULT_OPTIONS}}
     o["clips"] = max(1, min(20, int(o["clips"] or 6)))
+    if o.get("content") not in ("auto", "talk", "gaming"):
+        o["content"] = "auto"
+    from .reframe import STREAM_TEMPLATES
+
+    if o.get("stream_template") not in STREAM_TEMPLATES:
+        o["stream_template"] = "stack"
     if o.get("quality") not in QUALITY:
         o["quality"] = "good"
     if o["length"] not in LENGTHS:
         o["length"] = "ai"   # includes the old "auto" setting
-    o["provider"] = o["provider"] or settings.llm_provider
+    if not o["provider"]:
+        from .providers import active
+
+        o["provider"] = active()
     o["whisper_model"] = o["whisper_model"] or settings.whisper_model
     return o
 
@@ -79,6 +90,8 @@ def edit_from_options(o: dict) -> dict:
     return merge_edit(None, {
         "aspect": o["aspect"],
         "layout": o["layout"],
+        "stream": {"template": o.get("stream_template") or "stack",
+                   **({"cam_size": 0.42} if o.get("stream_template") in ("bubble", "card") else {})},
         "captions": {"enabled": bool(o["captions"]), "preset": o["preset"], "emoji": bool(o["emoji"])},
         "title": {"enabled": bool(o["title"])},
         "progress": {"enabled": bool(o["progress"])},
@@ -432,7 +445,15 @@ def run(p: Project, source: Path, log=None) -> Project:
                 lo = max(5.0, min(lo, p.duration * 0.5))
                 hi = max(lo + 5, min(hi, p.duration))
             context = (p.remote or {}).get("title") or p.name
+            from .gaming import is_gaming
+
+            gaming = o.get("content") == "gaming" or (
+                o.get("content", "auto") == "auto" and is_gaming(context, p.sentences, p.duration))
+            p.settings["content"] = "gaming" if gaming else "talk"
+            if gaming:
+                log("game stream detected: using the gaming agent")
             clips, model = select(p.sentences, audio, topic=o["topic"], k=o["clips"], context=context,
+                                  gaming=gaming, language=p.language, duration=p.duration,
                                   weights=settings.scoring_weights(), log=sel_log,
                                   min_len=lo, max_len=hi, llm=llm,
                                   min_score=QUALITY[o["quality"]])

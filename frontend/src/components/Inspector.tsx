@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Captions, Crop, Layers, Type, Wand2 } from "lucide-react";
-import type { Clip, Edit, Presets } from "../api";
+import type { Clip, Edit, Presets, StreamTemplate } from "../api";
 import { CSS_FILTERS, FILTER_LABELS } from "../lib/util";
 import { PresetSwatch } from "./OptionsForm";
 
@@ -282,14 +282,71 @@ function Slider({ label, min, max, step, value, set, fmt }: {
   );
 }
 
+export const STREAM_TEMPLATES: [StreamTemplate, string][] = [
+  ["stack", "Stacked"],
+  ["reaction", "Reaction"],
+  ["even", "50 / 50"],
+  ["bubble", "Bubble"],
+  ["card", "Card"],
+  ["gameplay", "Gameplay only"],
+];
+
+/** Tiny 9:16 drawing of a gaming template: grey = gameplay, accent = face-cam, white = banner. */
+export function TemplateArt({ t }: { t: StreamTemplate }) {
+  const G = "oklch(45% 0.03 268)";
+  const C = "var(--accent)";
+  const B = "#fff";
+  const W = 36;
+  const H = 64;
+  const stacked = (cam: number) => (
+    <>
+      <rect x={0} y={0} width={W} height={H * cam} fill={C} />
+      <rect x={0} y={H * cam} width={W} height={H * (1 - cam)} fill={G} />
+      <rect x={4} y={H * cam - 3} width={W - 8} height={6} rx={1.5} fill={B} />
+    </>
+  );
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ borderRadius: 4, overflow: "hidden" }}>
+      {t === "stack" && stacked(0.42)}
+      {t === "reaction" && stacked(0.6)}
+      {t === "even" && stacked(0.5)}
+      {(t === "bubble" || t === "card" || t === "gameplay") && <rect width={W} height={H} fill={G} />}
+      {t === "bubble" && <circle cx={10} cy={11} r={7.5} fill={C} stroke={B} strokeWidth={1.4} />}
+      {t === "card" && <rect x={3} y={4} width={16} height={12} fill={C} stroke={B} strokeWidth={1.4} />}
+      {t !== "stack" && t !== "reaction" && t !== "even" && (
+        <rect x={4} y={t === "gameplay" ? 8 : 24} width={W - 8} height={6} rx={1.5} fill={B} />
+      )}
+    </svg>
+  );
+}
+
 function StreamControls({ edit, onEdit }: { edit: Edit; onEdit: (e: Edit) => void }) {
-  const st = edit.stream ?? { auto: true, cam: "top", cam_size: 0.48, cam_zoom: 1, game: "fill" };
+  const st = edit.stream ?? { auto: true, template: "stack", corner: "tl", cam: "top", cam_size: 0.48, cam_zoom: 1, game: "fill" };
   const set = (patch: Partial<Edit["stream"]>) => onEdit({ ...edit, stream: { ...st, ...patch } });
   const show = edit.layout === "gaming" || edit.layout === "auto";
   if (!show) return null;
+  const tpl = st.template ?? "stack";
+  const overlay = tpl === "bubble" || tpl === "card" || tpl === "gameplay";
   return (
     <div className="stream-box">
-      <b>Gaming / stream</b>
+      <b>Gaming template</b>
+      <div className="tpl-grid">
+        {STREAM_TEMPLATES.map(([id, label]) => (
+          <button
+            key={id}
+            className={`tpl ${tpl === id ? "sel" : ""}`}
+            onClick={() =>
+              set({
+                template: id,
+                cam_size: id === "bubble" || id === "card" ? 0.42 : id === "stack" ? 0.48 : st.cam_size,
+              })
+            }
+          >
+            <TemplateArt t={id} />
+            {label}
+          </button>
+        ))}
+      </div>
       {edit.layout === "auto" && (
         <Toggle
           label="Use for face-cam scenes"
@@ -298,16 +355,34 @@ function StreamControls({ edit, onEdit }: { edit: Edit; onEdit: (e: Edit) => voi
           set={(v) => set({ auto: v })}
         />
       )}
-      <div className="field">
-        <span className="field-label">Face-cam position</span>
-        <div className="seg small">
-          {(["top", "bottom"] as const).map((v) => (
-            <button key={v} className={st.cam === v ? "sel" : ""} onClick={() => set({ cam: v })}>
-              {v === "top" ? "Top" : "Bottom"}
-            </button>
-          ))}
+      {!overlay ? (
+        <div className="field">
+          <span className="field-label">Face-cam position</span>
+          <div className="seg small">
+            {(["top", "bottom"] as const).map((v) => (
+              <button key={v} className={st.cam === v ? "sel" : ""} onClick={() => set({ cam: v })}>
+                {v === "top" ? "Top" : "Bottom"}
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      ) : tpl !== "gameplay" ? (
+        <div className="field">
+          <span className="field-label">Face-cam corner</span>
+          <div className="seg small">
+            {([
+              ["tl", "Top left"],
+              ["tr", "Top right"],
+              ["bl", "Bottom left"],
+              ["br", "Bottom right"],
+            ] as const).map(([v, label]) => (
+              <button key={v} className={(st.corner ?? "tl") === v ? "sel" : ""} onClick={() => set({ corner: v })}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
       <div className="field">
         <span className="field-label">Gameplay</span>
         <div className="seg small">
@@ -318,7 +393,17 @@ function StreamControls({ edit, onEdit }: { edit: Edit; onEdit: (e: Edit) => voi
           ))}
         </div>
       </div>
-      <Slider label="Face-cam size" min={0.25} max={0.55} step={0.01} value={st.cam_size} set={(v) => set({ cam_size: v })} fmt={(v) => `${Math.round(v * 100)}%`} />
+      {(tpl === "stack" || tpl === "bubble" || tpl === "card") && (
+        <Slider
+          label={overlay ? "Face-cam width" : "Face-cam size"}
+          min={0.25}
+          max={overlay ? 0.6 : 0.55}
+          step={0.01}
+          value={st.cam_size}
+          set={(v) => set({ cam_size: v })}
+          fmt={(v) => `${Math.round(v * 100)}%`}
+        />
+      )}
       <Slider label="Face-cam zoom" min={0.6} max={1.8} step={0.05} value={st.cam_zoom ?? 1} set={(v) => set({ cam_zoom: v })} fmt={(v) => `${v.toFixed(2)}x`} />
     </div>
   );

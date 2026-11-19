@@ -42,7 +42,7 @@ FinishedLabel=ClipForge is ready.%n%nYour clips are saved in Videos\ClipForge.
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
 Name: "ollama"; Description: "Install Ollama, the free local AI that picks clips (about 1 GB)"; GroupDescription: "AI:"; Check: not OllamaInstalled
-Name: "model"; Description: "Download the AI model qwen2.5:7b (about 4.7 GB, recommended)"; GroupDescription: "AI:"
+Name: "model"; Description: "Download the local AI model Gemma 4 (gemma4:e4b, about 6.6 GB, recommended)"; GroupDescription: "AI:"
 
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

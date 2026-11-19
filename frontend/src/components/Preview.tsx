@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
 import { Pause, Play, Repeat, Volume2, VolumeX } from "lucide-react";
-import type { Plan } from "../api";
+import type { Plan, StreamGeom } from "../api";
 import { captionAt, cropAt, interp, nextPlayable, toOutput, toSource, type CaptionState } from "../lib/playback";
 import { CSS_FILTERS, fmtTime } from "../lib/util";
 import { CaptionOverlay } from "./CaptionOverlay";
@@ -163,8 +163,10 @@ export const Preview = forwardRef<PreviewHandle, Props>(function Preview({ plan,
         const vf = v.videoWidth / p.source.w;
         const [cam, game] = sr.children as unknown as HTMLCanvasElement[];
         const cctx = cam.getContext("2d");
-        const [cx, cy, cw, ch] = gs.cam_crop;
-        cctx?.drawImage(v, cx * vf, cy * vf, cw * vf, ch * vf, 0, 0, cam.width, cam.height);
+        if (gs.cam_crop) {
+          const [cx, cy, cw, ch] = gs.cam_crop;
+          cctx?.drawImage(v, cx * vf, cy * vf, cw * vf, ch * vf, 0, 0, cam.width, cam.height);
+        }
         const gctx = game.getContext("2d");
         if (gctx) {
           if (gs.game === "fit") {
@@ -286,16 +288,7 @@ export const Preview = forwardRef<PreviewHandle, Props>(function Preview({ plan,
         )}
         {plan.stream && (
           <div ref={streamRef} className="stage-stream" style={{ filter, display: "none" }}>
-            <canvas
-              width={Math.round(size.w * 2)}
-              height={Math.round((size.h * 2 * plan.stream.cam_h) / plan.out.h)}
-              style={{ top: plan.stream.cam_pos === "top" ? 0 : `${(plan.stream.game_h / plan.out.h) * 100}%`, height: `${(plan.stream.cam_h / plan.out.h) * 100}%` }}
-            />
-            <canvas
-              width={Math.round(size.w * 2)}
-              height={Math.round((size.h * 2 * plan.stream.game_h) / plan.out.h)}
-              style={{ top: plan.stream.cam_pos === "top" ? `${(plan.stream.cam_h / plan.out.h) * 100}%` : 0, height: `${(plan.stream.game_h / plan.out.h) * 100}%` }}
-            />
+            <StreamCanvases g={plan.stream} out={plan.out} size={size} />
           </div>
         )}
         <CaptionOverlay plan={plan} cap={cap} t={outT} k={k} />
@@ -345,3 +338,41 @@ export const Preview = forwardRef<PreviewHandle, Props>(function Preview({ plan,
     </div>
   );
 });
+
+/** Face-cam canvas first, gameplay canvas second (drawn by the playback loop). */
+function StreamCanvases({ g, out, size }: { g: StreamGeom; out: { w: number; h: number }; size: { w: number; h: number } }) {
+  const pct = (v: number, of: number) => `${(v / of) * 100}%`;
+  if (g.inset || g.template === "gameplay") {
+    const [ix, iy, iw, ih] = g.inset ?? [0, 0, 2, 2];
+    const ring = Math.max(4, Math.floor(iw / 60) * 2);
+    return (
+      <>
+        <canvas
+          className={`stream-inset ${g.template}`}
+          width={Math.max(2, Math.round((size.w * 2 * iw) / out.w))}
+          height={Math.max(2, Math.round((size.w * 2 * ih) / out.w))}
+          style={{
+            left: pct(ix, out.w), top: pct(iy, out.h), width: pct(iw, out.w), height: pct(ih, out.h),
+            borderWidth: `${(ring / out.w) * size.w}px`, zIndex: 2,
+            display: g.inset ? "block" : "none",
+          }}
+        />
+        <canvas width={Math.round(size.w * 2)} height={Math.round(size.h * 2)} style={{ top: 0, height: "100%" }} />
+      </>
+    );
+  }
+  return (
+    <>
+      <canvas
+        width={Math.round(size.w * 2)}
+        height={Math.round((size.h * 2 * g.cam_h) / out.h)}
+        style={{ top: g.cam_pos === "top" ? 0 : pct(g.game_h, out.h), height: pct(g.cam_h, out.h) }}
+      />
+      <canvas
+        width={Math.round(size.w * 2)}
+        height={Math.round((size.h * 2 * g.game_h) / out.h)}
+        style={{ top: g.cam_pos === "top" ? pct(g.cam_h, out.h) : 0, height: pct(g.game_h, out.h) }}
+      />
+    </>
+  );
+}

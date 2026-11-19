@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .audio import AudioFeatures
@@ -23,6 +24,8 @@ class Candidate:
     def duration(self) -> float:
         return self.end - self.start
 
+
+CJK = re.compile(r"[぀-ヿ㐀-䶿一-鿿가-힯]")
 
 def build_candidates(sentences: list[Sentence], min_len: float, max_len: float) -> list[Candidate]:
     """Sentence-aligned windows across a few target durations inside [min_len, max_len]."""
@@ -198,13 +201,25 @@ def _clean_tags(tags) -> list[str]:
     return out[:6]
 
 
+def _language_rule(language: str) -> str:
+    lang = (language or "en")[:2]
+    if lang == "hi":
+        return ("Write title, banner and hashtags in Hinglish (Hindi in Latin letters, as Indian "
+                "creators write). Never use Chinese or other unrelated scripts.")
+    if lang == "en":
+        return "Write title, banner and hashtags in English."
+    return (f"Write title, banner and hashtags in the transcript's language ({lang}). "
+            "Never use Chinese or other unrelated scripts unless that is the transcript's language.")
+
+
 def _fatal(e: Exception) -> bool:
     msg = str(e)
     return any(x in msg for x in ("rejected", "not running", "not pulled", "disabled"))
 
 
 def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topic: str,
-               k: int, log, min_len: float, max_len: float, context: str = "") -> list[dict]:
+               k: int, log, min_len: float, max_len: float, context: str = "",
+               language: str = "") -> list[dict]:
     """Ask the LLM window by window, then turn its sentence ranges into picks."""
     windows = _windows(sentences, llm.context_chars - 2500, overlap=max_len)
     total = max(1.0, sentences[-1].end - sentences[0].start)
@@ -222,7 +237,8 @@ def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topi
         user = (
             (f"NICHE / TOPIC: {topic}\n\n" if topic else "")
             + (f"VIDEO TITLE (use it for the game / topic / who is speaking): {context}\n" if context else "")
-            + f"Clip length: your call per clip (hard limits {min_len:.0f}-{max_len:.0f} s).\n\n"
+            + f"Clip length: your call per clip (hard limits {min_len:.0f}-{max_len:.0f} s).\n"
+            + _language_rule(language) + "\n\n"
             + "TRANSCRIPT (sentence_id|start_seconds|text):\n"
             + _transcript_block(win)
             + (f"\n\nHigh-scoring windows from a cheap pre-filter (hints, not limits):\n{hints}"
@@ -453,6 +469,9 @@ def select(
     llm: LLM | None = None,
     min_score: int = 0,
     context: str = "",
+    gaming: bool = False,
+    language: str = "",
+    duration: float = 0.0,
 ) -> tuple[list[Clip], str]:
     k = k or settings.max_clips
     min_len = settings.min_clip if min_len is None else min_len
@@ -467,26 +486,49 @@ def select(
 
     picks: list[dict] = []
     model = "rules"
-    if llm is not None and llm.available:
-        picks = llm_select(sentences, cands, llm, topic, k, log, min_len, max_len, context=context)
+    if gaming:
+        from .gaming import agent_select
+
+        picks = agent_select(sentences, audio, duration or sentences[-1].end, k, llm, context=context,
+                             language=language, log=log, min_len=max(10.0, min_len * 0.7),
+                             max_len=min(60.0, max_len))
+        model = f"gaming agent ({llm.label})" if llm is not None and llm.available else "gaming agent (rules)"
+    elif llm is not None and llm.available:
+        picks = llm_select(sentences, cands, llm, topic, k, log, min_len, max_len, context=context,
+                           language=language)
         if picks:
             model = llm.label
+
     def scored(items: list[dict]) -> list[tuple[dict, Score]]:
         out = []
         for p in items:
             sc = score_span(p["text"], p["words"], p["end"] - p["start"], p["start"], p["end"],
                             audio, weights=weights, llm_subscores=p.get("scores") or None)
+            if p.get("gaming"):
+                # streams are judged on hype as much as on words: sparse speech is normal there
+                bonus = int(round(30 * (float(p.get("hype", 0.3)) - 0.3)))
+                sc.total = int(max(0, min(100, sc.total + bonus)))
+                sc.features["hype"] = round(float(p.get("hype", 0)), 2)
+                sc.reasons = ([f"{str(p.get('kind', 'hype')).capitalize()} moment found by the gaming agent"]
+                              + sc.reasons)[:4]
             out.append((p, sc))
         out.sort(key=lambda x: x[1].total, reverse=True)
         return out
 
     def tightened(items: list[tuple[dict, Score]]) -> list[tuple[dict, Score]]:
-        out = [_tighten_hook(p, sc, sentences, audio, weights, min_len) for p, sc in items]
+        out = [(p, sc) if p.get("gaming") else _tighten_hook(p, sc, sentences, audio, weights, min_len)
+               for p, sc in items]
         out.sort(key=lambda x: x[1].total, reverse=True)
         return out
 
     shortlist: list[tuple[dict, Score]] = []
     cap = max(k * 2, k + 4)       # judge more candidates than we will keep
+
+    common: set[str] = set()
+    if gaming:
+        from .gaming import common_words, same_story
+
+        common = common_words(picks)
 
     def take(items: list[tuple[dict, Score]]) -> None:
         for p, sc in items:
@@ -495,10 +537,15 @@ def select(
             if any(min(p["end"], q["end"]) - max(p["start"], q["start"])
                    > 0.15 * min(p["end"] - p["start"], q["end"] - q["start"]) for q, _ in shortlist):
                 continue
+            if p.get("gaming") and any(same_story(p, q, common) for q, _ in shortlist):
+                if log:
+                    log(f"gaming agent: skipped a repeat of '{p.get('story') or p.get('title')}'")
+                continue
             shortlist.append((p, sc))
 
     take(tightened(scored(picks)))                                    # the AI's picks first
-    take(tightened(scored(heuristic_select(all_cands, sentences, cap * 2))))   # then rule-based
+    if not gaming:                                                    # then rule-based
+        take(tightened(scored(heuristic_select(all_cands, sentences, cap * 2))))
 
     if llm is not None and llm.available and len(shortlist) >= 2:
         viral_judge(shortlist, llm, topic, log)
@@ -509,19 +556,27 @@ def select(
         log(f"quality bar {min_score}: {len(passed)} of {len(shortlist)} candidates pass")
     chosen = (passed or shortlist[:1])[:k]
 
+    cjk_ok = (language or "")[:2] in ("zh", "ja", "ko")
+
+    def clean(text: str) -> str:
+        """Small models sometimes drift into Chinese; drop such text unless the video is CJK."""
+        text = (text or "").strip()
+        return "" if (not cjk_ok and CJK.search(text)) else text
+
     clips: list[Clip] = []
     for rank, (p, sc) in enumerate(chosen, start=1):
         sc.grade = grade(sc.total)
+        title = clean(p.get("title")) or clean(make_title(p["text"])) or "Highlight"
         clip = Clip(
             id=f"clip_{rank:02d}",
             start=round(p["start"], 3),
             end=round(p["end"], 3),
-            title=p.get("title") or make_title(p["text"]),
+            title=title,
             hook=p.get("hook") or "",
-            summary=p.get("summary") or " ".join(p["text"].split()[:38]),
+            summary=clean(p.get("summary")) or " ".join(p["text"].split()[:38]),
             why=p.get("why") or (sc.reasons[0] if sc.reasons else ""),
-            hashtags=p.get("hashtags") or hashtags_for(p["text"]),
-            banner=p.get("banner") or "",
+            hashtags=[h for h in (p.get("hashtags") or hashtags_for(p["text"])) if clean(h)],
+            banner=clean(p.get("banner")) or (title if p.get("gaming") else ""),
             score=sc,
             rank=rank,
         )

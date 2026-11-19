@@ -43,16 +43,33 @@ python run.py video.mp4 --clips 6
 
 ## AI providers
 
-Set in the app (⚙ Settings) or `.env`:
+Open ⚙ Settings → **AI providers**. Every user adds their own API key; keys are saved only in
+`providers.json` on their PC (in `Videos\ClipForge`, or the project folder when run from source)
+and sent only to that provider. Nothing is built into the app.
 
-| `LLM_PROVIDER` | |
+| Provider | |
 |---|---|
-| `ollama` (default) | local, free. `qwen2.5:7b` fits 8 GB VRAM. ClipForge starts `ollama serve` if needed and unloads the model before Whisper runs so they share the GPU. |
-| `openrouter` | optional. Needs `OPENROUTER_API_KEY`; any model id (`OPENROUTER_MODEL`). |
-| `none` | rules only. The explainable scorer picks the clips. |
+| Ollama (local) | free and private. One-click download of Gemma 4 (`gemma4:e4b`, 6.6 GB, fits 8 GB VRAM, good Hindi). |
+| NVIDIA | free key from build.nvidia.com. Gemma 4 31B and Nemotron, with no OpenRouter rate limits. |
+| OpenRouter | many models behind one key. "Free models only" is on by default, so a key never spends credits. |
+| Google AI Studio, Groq, OpenAI, Custom | any OpenAI-compatible server. |
 
-If the LLM fails or returns too few clips, the rule-based picker tops up the list, so you always
-get the clip count you asked for.
+**Model allow-list:** each provider has an ordered list of allowed models. The first is used,
+the rest take over when it is busy (HTTP 429), and nothing outside the list is ever called.
+Rules only (no AI) is always available.
+
+## Gaming streams
+
+Long streams (auto-detected, or Content: gaming) go through the **gaming agent**:
+1. a per-second hype map from loudness spikes, jumps, bursts of talk and exclamations (English and Hindi);
+2. the AI reads the whole stream once (game, streamer, storyline, its own list of moments);
+3. it reviews every candidate (keep or not, type, exact start/end, Hinglish title and banner,
+   story label), asks again about any it skipped, and drops repeats of the same story;
+4. the viral judge ranks the finalists.
+
+**Gaming templates** (new project screen, or per clip in the editor): Stacked, Reaction (big face),
+50 / 50, Bubble (round face-cam with a white ring over full gameplay), Card (framed face-cam in a corner)
+and Gameplay only. The context banner moves with the template.
 
 ## Windows installer
 
@@ -63,7 +80,7 @@ rights. After copying the app it downloads and sets up everything else by itself
 - a private Python 3.12 (via `uv`) and all packages; PyTorch is not needed
 - CUDA libraries for fast Whisper, if an NVIDIA GPU is found
 - FFmpeg (with NVENC) and Deno (used by yt-dlp for YouTube)
-- Ollama (installed silently) and the `qwen2.5:7b` model, both ticked by default
+- Ollama (installed silently) and the Gemma 4 `gemma4:e4b` model, both ticked by default
 - checks the OpenRouter key if one was entered, writes the settings and runs a self-test
 
 The app opens in its own window. Projects are saved in `Videos\ClipForge`. Uninstall from

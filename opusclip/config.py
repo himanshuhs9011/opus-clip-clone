@@ -52,7 +52,7 @@ class Settings:
     # LLM provider: ollama (local, default) | openrouter (optional) | openai (any compatible) | none
     llm_provider: str = _env("LLM_PROVIDER", "ollama")
     ollama_host: str = _env("OLLAMA_HOST", "http://localhost:11434")
-    ollama_model: str = _env("OLLAMA_MODEL", "qwen2.5:7b")
+    ollama_model: str = _env("OLLAMA_MODEL", "gemma4:e4b")
     ollama_num_ctx: int = int(_env("OLLAMA_NUM_CTX", "8192"))
     # OpenRouter / OpenAI-compatible
     llm_base_url: str = _env("LLM_BASE_URL", "https://openrouter.ai/api/v1")

@@ -19,7 +19,15 @@ export interface Edit {
   end: number | null;
   aspect: "9:16" | "1:1" | "4:5" | "16:9";
   layout: "auto" | "track" | "split" | "gaming" | "center" | "fit";
-  stream: { auto: boolean; cam: "top" | "bottom"; cam_size: number; cam_zoom: number; game: "fill" | "fit" };
+  stream: {
+    auto: boolean;
+    template?: StreamTemplate;
+    corner?: "tl" | "tr" | "bl" | "br";
+    cam: "top" | "bottom";
+    cam_size: number;
+    cam_zoom: number;
+    game: "fill" | "fit";
+  };
   captions: {
     enabled: boolean;
     preset: string;
@@ -138,6 +146,7 @@ export interface Options {
   captions: boolean;
   aspect: Edit["aspect"];
   layout: Edit["layout"];
+  stream_template?: StreamTemplate;
   zoom: boolean;
   title: boolean;
   emoji: boolean;
@@ -200,12 +209,17 @@ export interface SplitScene {
   bottom: SplitHalf;
 }
 
+export type StreamTemplate = "stack" | "reaction" | "even" | "bubble" | "card" | "gameplay";
+
 export interface StreamGeom {
+  template?: StreamTemplate;
+  inset?: [number, number, number, number] | null;
+  corner?: "tl" | "tr" | "bl" | "br";
   cam_pos: "top" | "bottom";
   cam_h: number;
   game_h: number;
   game: "fill" | "fit";
-  cam_crop: [number, number, number, number];
+  cam_crop: [number, number, number, number] | null;
   game_crop: [number, number, number, number];
 }
 
@@ -254,7 +268,7 @@ export interface Health {
   whisper_models: string[];
   llm: {
     provider: string;
-    providers: Record<string, { ok: boolean; detail: string; model: string; configured: boolean }>;
+    providers: Record<string, { ok: boolean; detail: string; model: string; configured: boolean; name?: string }>;
     ollama_models: string[];
     openrouter_key_set: boolean;
   };
@@ -272,6 +286,40 @@ export interface AppSettings {
   whisper_model: string;
   whisper_models: string[];
   encoder: string;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  kind: "local" | "cloud";
+  about: string;
+  key_url: string;
+  key_prefix: string;
+  base_url: string;
+  base_url_editable: boolean;
+  key_set: boolean;
+  key_hint: string;
+  models: string[];
+  suggested: string[];
+  free_only: boolean;
+  configured: boolean;
+}
+
+export interface PullState {
+  model: string;
+  status: string;
+  completed: number;
+  total: number;
+  error: string;
+  done: boolean;
+}
+
+export interface ProvidersState {
+  active: string;
+  providers: ProviderInfo[];
+  ollama_models: string[];
+  ollama_picks: { model: string; size: string; note: string }[];
+  pull: PullState;
 }
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
@@ -303,6 +351,15 @@ export const api = {
     req<AppSettings>("/api/settings", json("PUT", s)),
   testLLM: (provider: string, model?: string, deep = false) =>
     req<{ ok: boolean; detail: string; label: string }>("/api/settings/test", json("POST", { provider, model, deep })),
+  providers: () => req<ProvidersState>("/api/providers"),
+  setActiveProvider: (id: string) => req<ProvidersState>("/api/providers/active", json("PUT", { id })),
+  saveProvider: (id: string, patch: { key?: string; base_url?: string; models?: string[]; free_only?: boolean; activate?: boolean }) =>
+    req<ProvidersState>(`/api/providers/${id}`, json("PUT", patch)),
+  providerModels: (id: string) => req<{ models: { id: string; free: boolean | null }[] }>(`/api/providers/${id}/models`),
+  testProvider: (id: string, model?: string) =>
+    req<{ ok: boolean; detail: string }>(`/api/providers/${id}/test`, json("POST", { model })),
+  pullModel: (model: string) => req<PullState>("/api/ollama/pull", json("POST", { model })),
+  pullState: () => req<PullState>("/api/ollama/pull"),
   projects: () => req<{ projects: ProjectSummary[] }>("/api/projects").then((r) => r.projects),
   project: (id: string, transcript = true) => req<Project>(`/api/projects/${id}?transcript=${transcript}`),
   deleteProject: (id: string) => req<{ deleted: string }>(`/api/projects/${id}`, { method: "DELETE" }),

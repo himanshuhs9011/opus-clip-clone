@@ -103,25 +103,82 @@ def unload_ollama(host: str | None = None) -> list[str]:
         return []
 
 
+# downloads started from Settings > Providers (one at a time)
+OLLAMA_PICKS = [
+    {"model": "gemma4:e4b", "size": "6.6 GB", "note": "Gemma 4. Best local pick for an 8 GB GPU, good Hindi."},
+    {"model": "gemma4:e2b", "size": "4.6 GB", "note": "Gemma 4 small. For 4-6 GB GPUs and laptops."},
+    {"model": "gemma4:12b-it-qat", "size": "7.2 GB", "note": "Gemma 4 12B. Stronger; wants 10 GB+ VRAM to be quick."},
+    {"model": "qwen2.5:7b", "size": "4.7 GB", "note": "Older default. Fast, weaker at Hindi."},
+]
+pull_state: dict = {"model": "", "status": "", "completed": 0, "total": 0, "error": "", "done": True}
+
+
+def start_pull(model: str, host: str | None = None) -> bool:
+    import threading
+
+    if not pull_state["done"]:
+        return False
+    host = (host or settings.ollama_host).rstrip("/")
+    pull_state.update(model=model, status="starting", completed=0, total=0, error="", done=False)
+
+    def run() -> None:
+        try:
+            if not ensure_ollama(host):
+                raise LLMError("Ollama is not installed or not running")
+            with httpx.stream("POST", f"{host}/api/pull", json={"model": model, "stream": True},
+                              timeout=httpx.Timeout(30, read=600)) as r:
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    msg = json.loads(line)
+                    if msg.get("error"):
+                        raise LLMError(msg["error"])
+                    pull_state["status"] = msg.get("status", "")
+                    if msg.get("total"):
+                        pull_state["total"] = msg["total"]
+                        pull_state["completed"] = msg.get("completed", 0)
+            pull_state["status"] = "success"
+        except Exception as e:
+            err = str(e)
+            if "newer version" in err or "412" in err:
+                err += " - update Ollama from ollama.com/download"
+            pull_state["error"] = err[:300]
+        finally:
+            pull_state["done"] = True
+
+    threading.Thread(target=run, daemon=True).start()
+    return True
+
+
 # --------------------------------------------------------------------------
 # client
 # --------------------------------------------------------------------------
 class LLM:
     def __init__(self, provider: str | None = None, model: str | None = None):
-        self.provider = (provider or settings.llm_provider or "none").lower()
-        if self.provider not in PROVIDERS:
-            self.provider = "none"
-        if self.provider == "ollama":
-            self.base_url = settings.ollama_host.rstrip("/")
-            self.api_key = ""
-            self.models = [model or settings.ollama_model]
+        from . import providers
+
+        prov = (provider or providers.active() or "none").lower()
+        prov = "custom" if prov == "openai" else prov
+        if prov not in providers.CATALOG:
+            prov = "none"
+        self.provider = prov
+        self.base_url, self.api_key, self.models = "", "", []
+        self.free_only = False
+        self.used_model = ""
+        if prov == "none":
+            return
+        cfg = providers.get(prov)
+        self.base_url, self.api_key = cfg["base_url"], cfg["key"]
+        self.free_only = cfg["free_only"]
+        allowed = cfg["models"]
+        if prov == "ollama":
+            self.models = [model or (allowed[0] if allowed else settings.ollama_model)]
         else:
-            self.base_url = (
-                "https://openrouter.ai/api/v1" if self.provider == "openrouter" and
-                "openrouter" not in settings.llm_base_url else settings.llm_base_url
-            ).rstrip("/")
-            self.api_key = settings.llm_api_key
-            self.models = [model or settings.llm_model, *settings.llm_fallback_models]
+            # only models the user allowed for this provider are ever called
+            first = [model] if model and (model in allowed or not allowed) else []
+            if self.free_only:
+                first = [m for m in first if m.endswith(":free")]
+            self.models = [*first, *allowed]
         self.models = list(dict.fromkeys(m for m in self.models if m))
 
     # ------------------------------------------------------------------
@@ -139,6 +196,8 @@ class LLM:
             return False
         if self.provider == "ollama":
             return True
+        if self.provider == "custom":
+            return bool(self.base_url)
         return bool(self.api_key)
 
     @property
@@ -182,40 +241,64 @@ class LLM:
         return (r.json().get("message") or {}).get("content", "")
 
     def _openai(self, system: str, user: str, max_tokens: int, temperature: float) -> str:
+        """Tries each allowed model in order. A busy (429) model hands over to the next one
+        quickly; only the last model waits out the rate limit."""
         last_err: Exception | None = None
-        for candidate in self.models:
+        for ci, candidate in enumerate(self.models):
+            is_last = ci == len(self.models) - 1
             payload = {
                 "model": candidate,
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
                 "temperature": temperature,
-                "max_tokens": max_tokens,
+                # reasoning models (Nemotron, Gemini 2.5...) think before answering and that
+                # counts against max_tokens: leave room so the JSON is not cut off
+                "max_tokens": min(32000, max_tokens * 2 + 4000),
             }
-            for attempt in range(2):
+            tries = 5 if is_last else 2
+            for attempt in range(tries):
                 try:
                     with httpx.Client(timeout=settings.llm_timeout) as client:
                         r = client.post(f"{self.base_url}/chat/completions",
                                         headers=self._headers(), json=payload)
                 except httpx.HTTPError as e:
-                    last_err = e
-                    time.sleep(1 + attempt)
+                    last_err = LLMError(f"{candidate}: {e}")
+                    if attempt >= 1:
+                        break
+                    time.sleep(2)
                     continue
                 if r.status_code == 200:
-                    choice = (r.json().get("choices") or [{}])[0]
+                    try:
+                        choice = (r.json().get("choices") or [{}])[0]
+                    except ValueError:
+                        last_err = LLMError(f"{candidate}: reply was not JSON")
+                        break
                     text = (choice.get("message") or {}).get("content")
                     if text:
+                        self.used_model = candidate
                         return text
                     last_err = LLMError(f"{candidate}: empty reply "
                                         f"(finish_reason={choice.get('finish_reason')})")
                     break
                 if r.status_code in (401, 403):
                     raise LLMError(f"API key rejected by {self.base_url} ({r.status_code})")
-                if r.status_code in (429, 502, 503):
-                    last_err = LLMError(f"{candidate}: HTTP {r.status_code}")
-                    time.sleep(2 + attempt * 3)
+                if r.status_code in (429, 500, 502, 503, 504):
+                    last_err = LLMError(f"{candidate}: HTTP {r.status_code} (busy or rate limited)")
+                    if attempt == tries - 1:
+                        break
+                    try:
+                        wait = float(r.headers.get("retry-after") or 0)
+                    except ValueError:
+                        wait = 0.0
+                    default = (6, 15, 30, 45)[attempt] if is_last else 3
+                    time.sleep(min(60.0, wait or default))
                     continue
+                if r.status_code == 404:
+                    last_err = LLMError(f"{candidate}: model not available on {self.base_url} "
+                                        "(retired or renamed) - pick another in Settings > Providers")
+                    break
                 last_err = LLMError(f"{candidate}: HTTP {r.status_code} {r.text[:200]}")
                 break
-        raise LLMError(str(last_err))
+        raise LLMError(str(last_err or "no model configured"))
 
     def complete(self, system: str, user: str, schema: dict | None = None,
                  max_tokens: int = 4000, temperature: float = 0.3) -> str:
@@ -249,8 +332,9 @@ class LLM:
         if self.provider == "none":
             return False, "rules only"
         if not self.available:
-            return False, "no API key"
-        key = (self.provider, self.base_url, self.model, self.api_key[-6:])
+            return False, ("no model allowed" if not self.models else
+                           "no server address" if self.provider == "custom" else "no API key")
+        key =(self.provider, self.base_url, self.model, self.api_key[-6:])
         now = time.time()
         hit = _verify_cache.get(key)
         if hit and now - hit[0] < 60:
@@ -290,16 +374,17 @@ _verify_cache: dict[tuple, tuple[float, tuple[bool, str]]] = {}
 
 
 def health() -> dict:
-    out = {"provider": settings.llm_provider, "providers": {}}
-    for prov in ("ollama", "openrouter"):
-        llm = LLM(prov)
+    from . import providers
+
+    active = providers.active()
+    out = {"provider": active, "providers": {}}
+    for p in providers.public()["providers"]:
+        if not p["configured"] and p["id"] != active:
+            continue
+        llm = LLM(p["id"])
         ok, detail = llm.verify()
-        out["providers"][prov] = {
-            "ok": ok,
-            "detail": detail,
-            "model": llm.model,
-            "configured": llm.available,
-        }
+        out["providers"][p["id"]] = {"ok": ok, "detail": detail, "model": llm.model,
+                                     "configured": llm.available, "name": p["name"]}
     out["ollama_models"] = ollama_models()
-    out["openrouter_key_set"] = bool(settings.llm_api_key)
+    out["openrouter_key_set"] = bool(providers.get("openrouter").get("key"))
     return out

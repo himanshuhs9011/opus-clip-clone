@@ -18,7 +18,7 @@ $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is 10x faster wit
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $Bin = Join-Path $AppDir "bin"
 $Version = "2.0.0"
-$Model = "qwen2.5:7b"
+$Model = "gemma4:e4b"
 $Warnings = @()
 New-Item -ItemType Directory -Force -Path $AppDir, $Bin | Out-Null
 try { Start-Transcript -Path "$AppDir\install.log" -Force | Out-Null } catch {}
@@ -167,7 +167,7 @@ try {
         if ($ollama) { $provider = "ollama" } elseif ($orKey) { $provider = "openrouter" }
         $whisper = "small"
         if ($gpu) { $whisper = "large-v3-turbo" }
-        $lines = @("LLM_PROVIDER=$provider", "OLLAMA_MODEL=$Model", "OPENROUTER_MODEL=google/gemini-2.5-flash",
+        $lines = @("LLM_PROVIDER=$provider", "OLLAMA_MODEL=$Model", "OPENROUTER_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free",
                    "WHISPER_MODEL=$whisper", "DOWNLOAD_MODE=smart")
         if ($orKey) { $lines += "OPENROUTER_API_KEY=$orKey" }
         Set-Content -Path "$AppDir\.env" -Value $lines -Encoding UTF8

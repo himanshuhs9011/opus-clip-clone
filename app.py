@@ -22,7 +22,8 @@ from opusclip import pipeline
 from opusclip.captions import list_styles
 from opusclip.config import settings, update_env
 from opusclip.edit import ASPECTS, DEFAULT_EDIT, FILTERS, LAYOUTS
-from opusclip.llm import LLM, health as llm_health, ollama_models
+from opusclip import providers
+from opusclip.llm import LLM, OLLAMA_PICKS, health as llm_health, ollama_models, pull_state, start_pull
 from opusclip.render import encoder_name, preview_plan
 from opusclip.text import download
 
@@ -87,7 +88,7 @@ def presets() -> dict:
 def get_settings() -> dict:
     key = settings.llm_api_key
     return {
-        "llm_provider": settings.llm_provider,
+        "llm_provider": providers.active(),
         "ollama_host": settings.ollama_host,
         "ollama_model": settings.ollama_model,
         "ollama_models": ollama_models(),
@@ -112,8 +113,109 @@ def put_settings(body: dict = Body(...)) -> dict:
         vals.pop("llm_api_key")   # empty field = keep the stored key
     if "whisper_model" in vals and vals["whisper_model"] not in WHISPER_MODELS:
         raise HTTPException(400, "unknown whisper model")
+    if "llm_provider" in vals:
+        providers.set_active(vals.pop("llm_provider").replace("openai", "custom"))
     update_env(vals)
     return get_settings()
+
+
+# --------------------------------------------------------------------------
+# providers: the user's own API keys, model allow-lists, local model downloads
+# --------------------------------------------------------------------------
+@app.get("/api/providers")
+def get_providers() -> dict:
+    return {**providers.public(), "ollama_models": ollama_models(), "ollama_picks": OLLAMA_PICKS,
+            "pull": pull_state}
+
+
+@app.put("/api/providers/active")
+def set_active_provider(body: dict = Body(...)) -> dict:
+    try:
+        providers.set_active(str(body.get("id", "")))
+    except KeyError:
+        raise HTTPException(400, "unknown provider")
+    return get_providers()
+
+
+@app.put("/api/providers/{pid}")
+def put_provider(pid: str, body: dict = Body(...)) -> dict:
+    try:
+        providers.update(pid, body)
+    except KeyError:
+        raise HTTPException(404, "unknown provider")
+    return get_providers()
+
+
+SKIP_MODELS = ("embed", "safety", "guard", "rerank", "whisper", "tts", "image", "vision-only", "parse")
+
+
+@app.get("/api/providers/{pid}/models")
+def provider_models(pid: str) -> dict:
+    """Models the provider offers, for the allow-list picker."""
+    import httpx
+
+    if pid == "ollama":
+        return {"models": [{"id": m, "free": True} for m in ollama_models()]}
+    cfg = providers.get(pid)
+    if not cfg or not cfg["base_url"]:
+        raise HTTPException(400, "add the server address first")
+    headers = {"Authorization": f"Bearer {cfg['key']}"} if cfg["key"] else {}
+    try:
+        r = httpx.get(f"{cfg['base_url']}/models", headers=headers, timeout=20)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+    except Exception as e:
+        raise HTTPException(502, f"could not list models: {str(e)[:150]}")
+    out = []
+    for m in data:
+        mid = str(m.get("id", "")).removeprefix("models/")
+        if not mid or any(x in mid for x in SKIP_MODELS):
+            continue
+        price = m.get("pricing") or {}
+        free = mid.endswith(":free") or (bool(price) and all(str(v) in ("0", "0.0") for v in price.values()))
+        out.append({"id": mid, "free": free if pid == "openrouter" else None,
+                    "context": m.get("context_length")})
+    out.sort(key=lambda x: (not x["free"], x["id"]) if pid == "openrouter" else (0, x["id"]))
+    return {"models": out}
+
+
+@app.post("/api/providers/{pid}/test")
+def test_provider(pid: str, body: dict = Body(default={})) -> dict:
+    import time
+
+    llm = LLM(pid, body.get("model") or None)
+    if body.get("model"):
+        llm.models = [body["model"]]          # test exactly the model asked for
+    ok, detail = llm.verify()
+    if ok:
+        try:
+            t = time.time()
+            out = llm.json_completion(
+                "Reply with JSON only.",
+                'Return {"ok": true, "line": "<one short Hinglish line: a gamer wins a 1v4 clutch>"}',
+                max_tokens=200)
+            ok = bool(out.get("ok"))
+            detail = f"{llm.used_model or llm.model} answered in {time.time() - t:.1f}s"
+            if out.get("line"):
+                detail += f': "{str(out["line"])[:80]}"'
+        except Exception as e:
+            ok, detail = False, str(e)[:220]
+    return {"ok": ok, "detail": detail}
+
+
+@app.post("/api/ollama/pull")
+def ollama_pull(body: dict = Body(...)) -> dict:
+    model = str(body.get("model", "")).strip()
+    if not re.fullmatch(r"[\w.\-/:]+", model):
+        raise HTTPException(400, "bad model name")
+    if not start_pull(model, providers.get("ollama")["base_url"]):
+        raise HTTPException(409, "a download is already running")
+    return pull_state
+
+
+@app.get("/api/ollama/pull")
+def ollama_pull_state() -> dict:
+    return pull_state
 
 
 @app.post("/api/settings/test")

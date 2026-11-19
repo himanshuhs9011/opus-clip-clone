@@ -36,7 +36,8 @@ DEFAULT_EDIT: dict = {
     "progress": {"enabled": False, "color": "#FFD400", "position": "top"},
     "zoom": {"enabled": True, "strength": 0.10},
     # gaming / stream layout: face-cam panel + gameplay panel
-    "stream": {"auto": True, "cam": "top", "cam_size": 0.48, "cam_zoom": 1.0, "game": "fill"},
+    "stream": {"auto": True, "template": "stack", "corner": "tl", "cam": "top", "cam_size": 0.48,
+               "cam_zoom": 1.0, "game": "fill"},
     "cuts": {"silence": False, "fillers": False, "removed": []},   # removed: word start in ms
     "word_edits": {},            # "start_ms" -> replacement text
     "filter": "none",
