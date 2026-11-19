@@ -18,7 +18,9 @@ export function CaptionOverlay({ plan, cap, t, k }: Props) {
   const H = plan.out.h * k;
   const tScale = plan.scale * k;
 
-  const titleOn = e.title.enabled && plan.title && t < Math.min(e.title.seconds, plan.duration);
+  const info = plan.title_info;
+  const isBanner = info?.mode === "banner";
+  const titleOn = !!info?.enabled && !!plan.title && (isBanner || t < Math.min(e.title.seconds, plan.duration));
   const emoji = e.captions.enabled && e.captions.emoji ? plan.emoji.find((x) => t >= x.t && t < x.end) : undefined;
   const cue = e.captions.enabled && cap.cue >= 0 ? plan.cues[cap.cue] : null;
   const sp = cue?.[0]?.sp ?? -1;
@@ -26,7 +28,20 @@ export function CaptionOverlay({ plan, cap, t, k }: Props) {
 
   return (
     <div className="overlay" style={{ width: W, height: H }}>
-      {titleOn && (
+      {titleOn && isBanner && (
+        <div
+          className="ov-title ov-banner"
+          style={{
+            top: H * (info?.y ?? 0.16),
+            fontSize: 58 * tScale,
+            padding: `${8 * tScale}px ${20 * tScale}px`,
+            maxWidth: W - 2 * 170 * tScale + 40 * tScale,
+          }}
+        >
+          {plan.title}
+        </div>
+      )}
+      {titleOn && !isBanner && (
         <div
           className="ov-title"
           style={{

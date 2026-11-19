@@ -85,6 +85,7 @@ class Clip:
     summary: str = ""
     why: str = ""
     hashtags: list[str] = field(default_factory=list)
+    banner: str = ""          # on-screen context line (what the clip is about)
     score: Score | None = None
     rank: int = 0
     file: str | None = None
@@ -110,6 +111,7 @@ class Clip:
             "summary": self.summary,
             "why": self.why,
             "hashtags": self.hashtags,
+            "banner": self.banner,
             "score": self.score.to_dict() if self.score else None,
             "rank": self.rank,
             "file": self.file,
@@ -126,7 +128,8 @@ class Clip:
         clip = cls(
             id=c["id"], start=c["start"], end=c["end"], title=c.get("title", ""),
             hook=c.get("hook", ""), summary=c.get("summary", ""), why=c.get("why", ""),
-            hashtags=c.get("hashtags") or [], rank=c.get("rank", 0), file=c.get("file"),
+            hashtags=c.get("hashtags") or [], banner=c.get("banner") or "", rank=c.get("rank", 0),
+            file=c.get("file"),
             thumb=c.get("thumb"), version=c.get("version", 0), track=c.get("track") or {},
             edit=c.get("edit") or {}, render=c.get("render") or {}, error=c.get("error"),
         )

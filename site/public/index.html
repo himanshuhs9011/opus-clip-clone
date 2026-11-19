@@ -133,6 +133,12 @@ section.tight { padding-top: var(--section-gap-s); }
 .clips img { height: 100%; object-fit: cover; }
 .score { font-variant-numeric: tabular-nums; color: var(--color-ink-2); }
 
+/* gaming: two process frames stacked, the finished clip beside them */
+.game { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 4fr); gap: var(--gap-columns); align-items: start; }
+.game-steps { display: grid; gap: var(--space-xl); }
+.game-clip { aspect-ratio: 9 / 16; }
+.game-clip img { height: 100%; object-fit: cover; }
+
 /* split: ranked list capture */
 .split { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: var(--space-2xl); align-items: center; }
 .split .copy { display: grid; gap: var(--space-md); }
@@ -169,7 +175,8 @@ footer p { max-width: 70ch; }
 
 @media (max-width: 60rem) {
   .nav ul { display: none; }
-  .hero .copy, .ba, .split, .band .inner, .final { grid-template-columns: minmax(0, 1fr); }
+  .hero .copy, .ba, .split, .band .inner, .final, .game { grid-template-columns: minmax(0, 1fr); }
+  .game-clip { max-width: 320px; }
   .hero .slot { margin-top: var(--space-xl); }
   .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); row-gap: var(--space-xl); }
   .rows div { grid-template-columns: minmax(0, 1fr); gap: var(--space-xs); }
@@ -196,6 +203,7 @@ footer p { max-width: 70ch; }
     <a class="wordmark" href="#main">ClipForge</a>
     <ul>
       <li><a href="#clips">Example clips</a></li>
+      <li><a href="#gaming">Gaming</a></li>
       <li><a href="#how">How it works</a></li>
       <li><a href="#online">Why not online</a></li>
     </ul>
@@ -261,6 +269,29 @@ footer p { max-width: 70ch; }
     </div>
   </section>
 
+  <section id="gaming" class="wrap">
+    <div class="head">
+      <h2>Game streams, cut like streamers do</h2>
+      <p class="lead">ClipForge finds the webcam over the gameplay, gives it its own panel and adds a banner saying what the clip is about.</p>
+    </div>
+    <div class="game">
+      <div class="game-steps">
+        <figure class="slot">
+          <img src="/img/game-source.webp" width="1600" height="900" loading="lazy" alt="A recorded game stream with a small webcam box on the right." />
+          <figcaption>First, the stream as recorded</figcaption>
+        </figure>
+        <figure class="slot">
+          <img src="/img/game-detected.webp" width="1600" height="900" loading="lazy" alt="The same frame with the webcam box outlined where ClipForge found it." />
+          <figcaption>Then ClipForge finds the face-cam box</figcaption>
+        </figure>
+      </div>
+      <figure class="slot game-clip">
+        <img src="/img/game-clip.webp" width="720" height="1280" loading="lazy" alt="The vertical clip: face-cam on top, gameplay below, a banner reading Streamer rants console vs PC FragPunk, captions over the gameplay." />
+        <figcaption>The clip: face-cam on top, gameplay below, a context banner on the seam</figcaption>
+      </figure>
+    </div>
+  </section>
+
   <section id="how" class="wrap">
     <div class="head">
       <h2>Four steps, no account</h2>
@@ -311,7 +342,7 @@ footer p { max-width: 70ch; }
 </main>
 
 <footer class="wrap">
-  <p>Example clips were made by ClipForge from a NASA video of astronaut Don Pettit (public domain). NASA does not endorse ClipForge.</p>
+  <p>Example clips were made by ClipForge from a NASA video of astronaut Don Pettit (public domain); NASA does not endorse ClipForge. The game example uses <a href="https://www.youtube.com/watch?v=NPHfewLSdBU">“The Most AGGRESSIVE Sonar PLAYER”</a> by Iphiclus, licensed <a href="https://creativecommons.org/licenses/by/3.0/">CC BY</a>, cut by ClipForge with the streamer hidden behind a dummy for this page.</p>
   <a href="https://github.com/himanshuhs9011/opus-clip-clone">Source code on GitHub</a>
 </footer>
 </body>

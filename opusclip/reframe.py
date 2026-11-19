@@ -21,7 +21,7 @@ import numpy as np
 from .config import settings
 from .probe import NO_WINDOW
 
-TRACK_VERSION = 5
+TRACK_VERSION = 8
 DET_NAME = "face_detection_yunet_2023mar.onnx"
 REC_NAME = "face_recognition_sface_2021dec.onnx"
 ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models/"
@@ -29,7 +29,7 @@ URLS = {
     DET_NAME: [ZOO + "face_detection_yunet/" + DET_NAME],
     REC_NAME: [ZOO + "face_recognition_sface/" + REC_NAME],
 }
-SAMPLE_W = 800
+SAMPLE_W = 1280   # high enough to see a face inside a small webcam overlay
 ASD_FPS = 6.0           # samples per second; lip motion needs more than plain tracking
 MIN_SHOT = 1.0          # seconds a speaker shot must last before we cut away
 
@@ -102,7 +102,7 @@ class _Faces:
                 if float(f[14]) < 0.6:
                     continue
                 x, y, fw, fh = (float(v) for v in f[:4])
-                if fh / h < 0.03:
+                if fh / h < 0.012:
                     continue   # too small to matter even as a face-cam
                 out.append({"cx": (x + fw / 2) / w, "cy": (y + fh / 2) / h, "w": fw / w,
                             "h": fh / h, "area": (fw * fh) / (w * h), "row": f.copy()})
@@ -269,6 +269,7 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
     times: list[float] = []
     dets: list[list[dict]] = []
     cams: list[dict | None] = []     # largest face of any size per sample (face-cam finder)
+    edge_x = edge_y = None            # edges averaged over time: overlay borders stay, gameplay blurs out
     scene_of: list[int] = []
     prev_hist = prev_thumb = None
     scene = 0
@@ -278,6 +279,11 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
         hist = cv2.calcHist([hsv], [0, 1], None, [32, 32], [0, 180, 0, 256])
         cv2.normalize(hist, hist)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        small_g = cv2.resize(gray, (640, 360), interpolation=cv2.INTER_AREA).astype(np.float32)
+        gx = np.abs(cv2.Sobel(small_g, cv2.CV_32F, 1, 0, ksize=3))
+        gy = np.abs(cv2.Sobel(small_g, cv2.CV_32F, 0, 1, ksize=3))
+        edge_x = gx if edge_x is None else edge_x + gx
+        edge_y = gy if edge_y is None else edge_y + gy
         thumb = cv2.resize(gray, (64, 36), interpolation=cv2.INTER_AREA).astype(np.float32)
         if prev_hist is not None:
             corr = cv2.compareHist(prev_hist, hist, cv2.HISTCMP_CORREL)
@@ -329,6 +335,14 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
             log("could not read frames for tracking - centre crop")
         return base
     n = len(times)
+    stream_cam = _stream_cam(cams, dets, n)
+    if stream_cam and edge_x is not None:
+        rect = _cam_rect(edge_x / n, edge_y / n, stream_cam)
+        if rect:
+            stream_cam["rect"] = rect
+    base["stream_cam"] = stream_cam
+    if stream_cam and log:
+        log(f"face-cam overlay found at x={stream_cam['cx']:.2f} y={stream_cam['cy']:.2f}")
     ts = np.array(times)
     coverage = sum(1 for d in dets if d) / n
     if coverage == 0:
@@ -503,6 +517,64 @@ def track(src: str | Path, start: float, end: float, src_w: int, src_h: int,
             "main_face": _cam_box([c for c in cams if c])}
 
 
+def _stream_cam(cams: list, dets: list, n: int) -> dict | None:
+    """A game stream: a small face that stays in one place (the webcam overlay) for much of
+    the clip, while full-size faces are rare. Judged over the whole clip, because fast
+    gameplay makes every second look like a new scene."""
+    small = [c for c in cams if c and c["h"] < 0.16]
+    if n == 0 or len(small) < 0.3 * n:
+        return None
+    big_share = sum(1 for d in dets if d) / n
+    if big_share >= 0.3:
+        return None
+    med = _cam_box(small)
+    near = [c for c in small if abs(c["cx"] - med["cx"]) < 0.06 and abs(c["cy"] - med["cy"]) < 0.08]
+    return _cam_box(near) if len(near) >= 0.25 * n else None
+
+
+def _cam_rect(ex: np.ndarray, ey: np.ndarray, cam: dict) -> dict | None:
+    """Find the webcam overlay's rectangle around the face from time-averaged edges.
+    The overlay border is the same in every frame, so it stays sharp in the average while
+    moving gameplay smears out. Returns normalised {x0, y0, x1, y1} or None."""
+    H, W = ex.shape
+    fx, fy, fh = cam["cx"] * W, cam["cy"] * H, max(4.0, cam["h"] * H)
+
+    def pick(profile: np.ndarray, lo: float, hi: float, edge_pos: int) -> int:
+        lo_i, hi_i = int(max(0, lo)), int(min(len(profile) - 1, hi))
+        if hi_i - lo_i < 3:
+            return edge_pos
+        seg = profile[lo_i:hi_i + 1]
+        k = int(np.argmax(seg))
+        if seg[k] >= 2.5 * (np.median(seg) + 1e-6):
+            return lo_i + k
+        return edge_pos           # no clear border: the overlay runs to the frame edge
+
+    band_y = slice(int(max(0, fy - 1.5 * fh)), int(min(H, fy + 1.5 * fh)))
+    cols = ex[band_y, :].mean(axis=0)
+    left = pick(cols, fx - 9 * fh, fx - 0.9 * fh, 0)
+    right = pick(cols, fx + 0.9 * fh, fx + 9 * fh, W - 1)
+    band_x = slice(int(max(0, fx - 1.0 * fh)), int(min(W, fx + 1.0 * fh)))
+    rows = ey[:, band_x].mean(axis=1)
+    top = pick(rows, fy - 7 * fh, fy - 0.9 * fh, 0)
+    bottom = pick(rows, fy + 0.9 * fh, fy + 7 * fh, H - 1)
+    # webcams are 16:9 (sometimes 4:3): if one horizontal edge is off, trust the width and
+    # the edge nearer the face, and rebuild the other from that shape
+    w = right - left
+    expect = w * 9 / 16
+    h = bottom - top
+    if not (0.7 * expect <= h <= 1.45 * expect):
+        if abs(fy - top) < abs(bottom - fy):
+            bottom = int(min(H - 1, top + expect))
+        else:
+            top = int(max(0, bottom - expect))
+    h = bottom - top
+    if w < 2 * fh or h < 2 * fh or w > 0.7 * W or h > 0.8 * H:
+        return None               # not a believable webcam box
+    pad = 2                       # stay inside the border line
+    return {"x0": round((left + pad) / W, 4), "y0": round((top + pad) / H, 4),
+            "x1": round((right - pad) / W, 4), "y1": round((bottom - pad) / H, 4)}
+
+
 def _cam_box(seen: list[dict]) -> dict | None:
     """Where the face-cam sits: median face position/size (a webcam overlay does not move)."""
     if not seen:
@@ -582,6 +654,7 @@ def stream_geometry(src_w: int, src_h: int, out_w: int, out_h: int, cam: dict, c
     # face-cam: head and shoulders, face a little above centre
     ar = out_w / cam_h
     zoom = min(2.0, max(0.5, float(cfg.get("cam_zoom") or 1.0)))   # >1 = tighter on the face
+    rect = cam.get("rect")
     # wide framing (head, shoulders, chair): the face is about a quarter of the panel height
     ch = min(src_h, max(cam["h"] * src_h * 4.2 / zoom, src_h * 0.1))
     cw = ch * ar
@@ -590,6 +663,17 @@ def stream_geometry(src_w: int, src_h: int, out_w: int, out_h: int, cam: dict, c
     cw, ch = _even(cw), _even(ch)
     cx = min(max(cam["cx"] * src_w - cw / 2, 0), src_w - cw)
     cy = min(max(cam["cy"] * src_h - ch * 0.38, 0), src_h - ch)   # face in the upper third
+    if rect:
+        # crop inside the webcam box only, so no gameplay leaks into the face-cam panel
+        rx0, ry0 = rect["x0"] * src_w, rect["y0"] * src_h
+        rw, rh = (rect["x1"] - rect["x0"]) * src_w, (rect["y1"] - rect["y0"]) * src_h
+        if rw / rh > ar:
+            ch2, cw2 = rh / zoom, rh / zoom * ar
+        else:
+            cw2, ch2 = rw / zoom, rw / zoom / ar
+        cw, ch = _even(min(cw2, rw)), _even(min(ch2, rh))
+        cx = min(max(cam["cx"] * src_w - cw / 2, rx0), rx0 + rw - cw)
+        cy = min(max(cam["cy"] * src_h - ch * 0.38, ry0), ry0 + rh - ch)
     # gameplay: centre crop of the frame (fill) or the whole frame (fit)
     gar = out_w / game_h
     gh = src_h

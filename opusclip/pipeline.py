@@ -431,7 +431,8 @@ def run(p: Project, source: Path, log=None) -> Project:
             if p.duration < lo * 1.5:      # short source: allow shorter clips
                 lo = max(5.0, min(lo, p.duration * 0.5))
                 hi = max(lo + 5, min(hi, p.duration))
-            clips, model = select(p.sentences, audio, topic=o["topic"], k=o["clips"],
+            context = (p.remote or {}).get("title") or p.name
+            clips, model = select(p.sentences, audio, topic=o["topic"], k=o["clips"], context=context,
                                   weights=settings.scoring_weights(), log=sel_log,
                                   min_len=lo, max_len=hi, llm=llm,
                                   min_score=QUALITY[o["quality"]])

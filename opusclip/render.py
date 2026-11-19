@@ -144,6 +144,10 @@ def plan(clip: Clip, sentences: list[Sentence], src_w: int, src_h: int) -> dict:
     voices = {w["sp"] for w in owords if w.get("sp", -1) >= 0}
     split = split_for(trk, a, b) if oh > ow * 1.1 else []
     layout = edit["layout"]
+    scfg = edit.get("stream") or {}
+    vertical = oh > ow * 1.1
+    if layout == "auto" and trk.get("stream_cam") and vertical and scfg.get("auto", True):
+        layout = "gaming"             # a webcam overlay on gameplay for most of the clip
     if layout == "auto":
         cov = trk.get("coverage")
         if cov is not None and cov < 0.35:
@@ -156,12 +160,10 @@ def plan(clip: Clip, sentences: list[Sentence], src_w: int, src_h: int) -> dict:
         layout = "track"
     if layout != "split":
         split = []
-    scfg = edit.get("stream") or {}
     stream = None            # gaming layout geometry
     stream_ranges: list[list[float]] = []
-    vertical = oh > ow * 1.1
     if layout == "gaming":
-        cam = trk.get("main_face")
+        cam = trk.get("stream_cam") or trk.get("main_face")
         if cam and vertical:
             stream = stream_geometry(src_w, src_h, ow, oh, cam, scfg)
             stream_ranges = [[0.0, round(b - a, 3)]]
@@ -181,15 +183,34 @@ def plan(clip: Clip, sentences: list[Sentence], src_w: int, src_h: int) -> dict:
     pos = float(edit["captions"].get("position", 0.7))
     split_cover = sum(sc["t1"] - sc["t0"] for sc in split) / max(0.1, b - a)
     stream_cover = sum(e - s for s, e in stream_ranges) / max(0.1, b - a)
-    if abs(pos - 0.70) < 1e-6:   # default position: move captions onto the panel seam
-        if split_cover > 0.5:
-            edit["captions"]["position"] = 0.5
-        elif stream and stream_cover > 0.5:
-            seam = stream["cam_h"] / oh
-            edit["captions"]["position"] = round(seam if stream["cam_pos"] == "top" else 1 - seam, 3)
+    seam = None                   # where the two panels meet (fraction of height)
+    if split_cover > 0.5:
+        seam = 0.5
+    elif stream and stream_cover > 0.5:
+        seam = round(stream["cam_h"] / oh if stream["cam_pos"] == "top" else 1 - stream["cam_h"] / oh, 3)
+
+    # title: a context banner on the seam (gaming / split), or a short hook at the top
+    tcfg = edit.get("title") or {}
+    mode = tcfg.get("mode") or "auto"
+    if mode == "auto":
+        mode = "banner" if seam is not None else "hook"
+    banner_text = (tcfg.get("text") or clip.banner or clip.title or "").strip()
+    title = {"mode": mode, "enabled": bool(tcfg.get("enabled")) and bool(banner_text),
+             "text": banner_text if mode == "banner" else (tcfg.get("text") or clip.title or "").strip(),
+             "y": seam if (mode == "banner" and seam is not None) else (0.16 if mode == "banner" else None),
+             "seconds": float(tcfg.get("seconds") or 3.5)}
+
+    if abs(pos - 0.70) < 1e-6 and seam is not None:   # default caption position
+        if title["enabled"] and mode == "banner":
+            # the banner owns the seam: captions go into the gameplay / lower panel
+            lower_is_bottom = not (stream and stream_cover > 0.5 and stream["cam_pos"] == "bottom")
+            edit["captions"]["position"] = 0.74 if lower_is_bottom else 0.26
+        else:
+            edit["captions"]["position"] = seam
     return {"edit": edit, "a": a, "b": b, "segs": segs, "duration": dur, "words": owords,
             "w": ow, "h": oh, "layout": layout, "keys": keys, "split": split, "fit": fit,
-            "stream": stream, "stream_ranges": stream_ranges, "voices": sorted(voices)}
+            "stream": stream, "stream_ranges": stream_ranges, "voices": sorted(voices),
+            "title": title}
 
 
 def _split_size(pl: dict, src_w: int, src_h: int) -> tuple[int, int]:
@@ -249,7 +270,9 @@ def preview_plan(clip: Clip, sentences: list[Sentence], src_w: int, src_h: int,
         "preset": st,
         "upper": st["upper"] if cap.get("uppercase") is None else bool(cap["uppercase"]),
         "per_cue": per_cue,
-        "title": (e["title"].get("text") or clip.title or "").strip(),
+        "title": pl["title"]["text"],
+        "title_info": pl["title"],
+        "banner": clip.banner,
     }
 
 
@@ -438,7 +461,7 @@ def render_clip(src: str | Path, src_w: int, src_h: int, has_audio: bool, clip: 
     fg_path = out_dir / f"{stem}.graph.txt"
 
     ass_path.write_text(build_ass(pl["words"], pl["duration"], pl["w"], pl["h"], edit,
-                                  title=clip.title), encoding="utf-8")
+                                  title=pl["title"]), encoding="utf-8")
 
     emojis: list[tuple[Path, dict]] = []
     cap = edit["captions"]

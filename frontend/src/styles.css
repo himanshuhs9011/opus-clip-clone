@@ -486,3 +486,4 @@ textarea.input { padding: var(--space-xs) var(--space-sm); resize: vertical; lin
 .stream-box { margin: var(--space-md) 0; padding: var(--space-md); border: 1px solid var(--rule); border-radius: var(--radius-control); background: var(--well); }
 .stream-box > b { display: block; margin-bottom: var(--space-sm); font-size: var(--text-sm); }
 .hint-inline { font-style: normal; color: var(--faint); margin-left: var(--space-2xs); float: none !important; }
+.ov-banner { transform: translate(-50%, -50%); animation: none; }

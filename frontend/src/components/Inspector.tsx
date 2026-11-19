@@ -211,14 +211,31 @@ export function Inspector({
               <span className="field-label">Clip title</span>
               <input className="input" value={title} onChange={(e) => onTitle(e.target.value)} />
             </label>
-            <Toggle label="Hook title on video" sub="Shown at the top for the first seconds" on={edit.title.enabled} set={(v) => onEdit({ ...edit, title: { ...edit.title, enabled: v } })} />
+            <Toggle label="Title on video" sub="A context banner or a short hook so viewers know what the clip is about" on={edit.title.enabled} set={(v) => onEdit({ ...edit, title: { ...edit.title, enabled: v } })} />
             {edit.title.enabled && (
               <>
+                <div className="field">
+                  <span className="field-label">Style</span>
+                  <div className="seg small">
+                    {([
+                      ["auto", "Auto"],
+                      ["banner", "Context banner"],
+                      ["hook", "Hook at top"],
+                    ] as const).map(([id, l]) => (
+                      <button key={id} className={(edit.title.mode ?? "auto") === id ? "sel" : ""} onClick={() => onEdit({ ...edit, title: { ...edit.title, mode: id } })}>
+                        {l}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="hint">Auto puts a banner on the seam of gaming and split-screen clips for the whole clip, and a hook at the top of the others.</p>
+                </div>
                 <label className="field">
                   <span className="field-label">On-screen text</span>
-                  <input className="input" placeholder={title} value={edit.title.text ?? ""} onChange={(e) => onEdit({ ...edit, title: { ...edit.title, text: e.target.value || null } })} />
+                  <input className="input" placeholder={clip.banner || title} value={edit.title.text ?? ""} onChange={(e) => onEdit({ ...edit, title: { ...edit.title, text: e.target.value || null } })} />
                 </label>
-                <Slider label="Show for" min={1} max={10} step={0.5} value={edit.title.seconds} set={(v) => onEdit({ ...edit, title: { ...edit.title, seconds: v } })} fmt={(v) => `${v}s`} />
+                {(edit.title.mode ?? "auto") === "hook" && (
+                  <Slider label="Show for" min={1} max={10} step={0.5} value={edit.title.seconds} set={(v) => onEdit({ ...edit, title: { ...edit.title, seconds: v } })} fmt={(v) => `${v}s`} />
+                )}
               </>
             )}
             <label className="field">

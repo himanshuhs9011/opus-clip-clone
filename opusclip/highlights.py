@@ -120,6 +120,11 @@ Rules:
 - Skip intros, sponsor reads and "like and subscribe".
 - Do not pick overlapping clips. Maximise variety across topics.
 
+The "banner" is shown on screen for the whole clip so a scrolling viewer instantly knows
+what it is about. Name the game, show or topic from the video title, say what happens,
+make it intriguing. Examples: "Streamer finds a secret room in Minecraft and PANICS",
+"Pro player explains why console aim is UNFAIR in Fragpunk".
+
 Score each clip 0-100 on:
   hook        - does the first 3 seconds stop the scroll
   retention   - pacing, no rambling, keeps tension
@@ -130,6 +135,7 @@ Score each clip 0-100 on:
 Return STRICT JSON only:
 {"clips":[{"start_sid":<int>,"end_sid":<int>,"title":"<=8 words, same language as transcript",
 "hook":"the literal opening words","summary":"1 sentence","why":"why it works, 1 sentence",
+"banner":"on-screen context line, max 12 words: who + what happens + the game/topic, curiosity, ONE key word in CAPS",
 "hashtags":["#tag"],
 "scores":{"hook":0-100,"retention":0-100,"emotion":0-100,"value":0-100,"quotability":0-100},
 "risks":["short risk"]}]}"""
@@ -146,6 +152,7 @@ SCHEMA = {
                     "start_sid": {"type": "integer"},
                     "end_sid": {"type": "integer"},
                     "title": {"type": "string"},
+                    "banner": {"type": "string"},
                     "hook": {"type": "string"},
                     "summary": {"type": "string"},
                     "why": {"type": "string"},
@@ -157,7 +164,7 @@ SCHEMA = {
                     },
                     "risks": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["start_sid", "end_sid", "title", "hook", "why", "hashtags", "scores"],
+                "required": ["start_sid", "end_sid", "title", "banner", "hook", "why", "hashtags", "scores"],
             },
         }
     },
@@ -197,7 +204,7 @@ def _fatal(e: Exception) -> bool:
 
 
 def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topic: str,
-               k: int, log, min_len: float, max_len: float) -> list[dict]:
+               k: int, log, min_len: float, max_len: float, context: str = "") -> list[dict]:
     """Ask the LLM window by window, then turn its sentence ranges into picks."""
     windows = _windows(sentences, llm.context_chars - 2500, overlap=max_len)
     total = max(1.0, sentences[-1].end - sentences[0].start)
@@ -214,6 +221,7 @@ def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topi
         )
         user = (
             (f"NICHE / TOPIC: {topic}\n\n" if topic else "")
+            + (f"VIDEO TITLE (use it for the game / topic / who is speaking): {context}\n" if context else "")
             + f"Clip length: your call per clip (hard limits {min_len:.0f}-{max_len:.0f} s).\n\n"
             + "TRANSCRIPT (sentence_id|start_seconds|text):\n"
             + _transcript_block(win)
@@ -254,6 +262,7 @@ def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topi
                 "start_sid": a, "end_sid": b, "start": start, "end": end, "words": words,
                 "text": " ".join(s.text for s in sentences[a : b + 1]),
                 "title": str(item.get("title") or "").strip().strip('"')[:80],
+                "banner": str(item.get("banner") or "").strip().strip('"')[:110],
                 "hook": str(item.get("hook") or "").strip()[:200],
                 "summary": str(item.get("summary") or "").strip()[:400],
                 "why": str(item.get("why") or "").strip()[:400],
@@ -443,6 +452,7 @@ def select(
     max_len: float | None = None,
     llm: LLM | None = None,
     min_score: int = 0,
+    context: str = "",
 ) -> tuple[list[Clip], str]:
     k = k or settings.max_clips
     min_len = settings.min_clip if min_len is None else min_len
@@ -458,7 +468,7 @@ def select(
     picks: list[dict] = []
     model = "rules"
     if llm is not None and llm.available:
-        picks = llm_select(sentences, cands, llm, topic, k, log, min_len, max_len)
+        picks = llm_select(sentences, cands, llm, topic, k, log, min_len, max_len, context=context)
         if picks:
             model = llm.label
     def scored(items: list[dict]) -> list[tuple[dict, Score]]:
@@ -511,6 +521,7 @@ def select(
             summary=p.get("summary") or " ".join(p["text"].split()[:38]),
             why=p.get("why") or (sc.reasons[0] if sc.reasons else ""),
             hashtags=p.get("hashtags") or hashtags_for(p["text"]),
+            banner=p.get("banner") or "",
             score=sc,
             rank=rank,
         )

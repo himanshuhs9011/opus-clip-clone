@@ -32,7 +32,7 @@ export interface Edit {
     speaker_colors: boolean;
     speakers: Record<string, string>;
   };
-  title: { enabled: boolean; text: string | null; seconds: number };
+  title: { enabled: boolean; text: string | null; seconds: number; mode?: "auto" | "banner" | "hook" };
   progress: { enabled: boolean; color: string; position: "top" | "bottom" };
   zoom: { enabled: boolean; strength: number };
   cuts: { silence: boolean; fillers: boolean; removed: string[] };
@@ -62,6 +62,7 @@ export interface Clip {
   summary: string;
   why: string;
   hashtags: string[];
+  banner?: string;
   score: Score | null;
   rank: number;
   file: string | null;
@@ -236,6 +237,8 @@ export interface Plan {
   upper: boolean;
   per_cue: number;
   title: string;
+  title_info?: { mode: "banner" | "hook"; enabled: boolean; text: string; y: number | null; seconds: number };
+  banner?: string;
   video: string | null;
   video_offset?: number;
   partial?: boolean;

@@ -207,6 +207,8 @@ def build_ass(owords: list[dict], duration: float, width: int, height: int, edit
         f"Style: Title,Arial Black,{title_fs},&H00101010,&H00101010,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,"
         f"100,100,0,0,3,{int(18 * tsc)},0,8,{int(110 * tsc)},{int(110 * tsc)},0,1",
         "Style: Bar,Arial,10,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1",
+        f"Style: Banner,Arial Black,{int(round(58 * tsc))},&H00101010,&H00101010,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,"
+        f"100,100,0,0,3,{int(20 * tsc)},0,5,{int(170 * tsc)},{int(170 * tsc)},0,1",
     ]
     header = (
         "[Script Info]\nScriptType: v4.00+\n"
@@ -222,15 +224,27 @@ def build_ass(owords: list[dict], duration: float, width: int, height: int, edit
 
     # ---------------------------------------------------------------- title
     tcfg = edit.get("title") or {}
-    ttext = (tcfg.get("text") or title or "").strip()
-    if tcfg.get("enabled") and ttext:
-        secs = min(float(tcfg.get("seconds") or 3.5), duration)
-        ty = int(height * (0.11 if height > width else 0.07))
-        ev.append(
-            f"Dialogue: 5,{_ts(0)},{_ts(secs)},Title,,0,0,0,,"
-            f"{{\\an8\\pos({x},{ty})\\fad(120,250)\\fscx88\\fscy88\\t(0,160,\\fscx100\\fscy100)}}"
-            f"{_esc(ttext)}"
-        )
+    tinfo = title if isinstance(title, dict) else {
+        "mode": "hook", "enabled": bool(tcfg.get("enabled")), "y": None,
+        "text": (tcfg.get("text") or title or "").strip(), "seconds": float(tcfg.get("seconds") or 3.5)}
+    ttext = (tinfo.get("text") or "").strip()
+    if tinfo.get("enabled") and ttext:
+        if tinfo.get("mode") == "banner":
+            # context banner: stays for the whole clip, centred on the panel seam
+            by = int(height * float(tinfo.get("y") or 0.16))
+            ev.append(
+                f"Dialogue: 5,{_ts(0)},{_ts(duration)},Banner,,0,0,0,,"
+                f"{{\\an5\\pos({x},{by})\\fad(150,0)\\fscx92\\fscy92\\t(0,180,\\fscx100\\fscy100)}}"
+                f"{_esc(ttext)}"
+            )
+        else:
+            secs = min(float(tinfo.get("seconds") or 3.5), duration)
+            ty = int(height * (0.11 if height > width else 0.07))
+            ev.append(
+                f"Dialogue: 5,{_ts(0)},{_ts(secs)},Title,,0,0,0,,"
+                f"{{\\an8\\pos({x},{ty})\\fad(120,250)\\fscx88\\fscy88\\t(0,160,\\fscx100\\fscy100)}}"
+                f"{_esc(ttext)}"
+            )
 
     # -------------------------------------------------------------- progress
     pcfg = edit.get("progress") or {}

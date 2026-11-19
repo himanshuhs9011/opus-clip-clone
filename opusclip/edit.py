@@ -31,7 +31,8 @@ DEFAULT_EDIT: dict = {
         "speaker_colors": True,  # each speaker gets their own caption colour
         "speakers": {},          # "0" -> "#hex" overrides; empty = automatic contrast palette
     },
-    "title": {"enabled": True, "text": None, "seconds": 3.5},
+    # mode: auto = context banner on the seam for gaming / split layouts, hook title on top otherwise
+    "title": {"enabled": True, "text": None, "seconds": 3.5, "mode": "auto"},
     "progress": {"enabled": False, "color": "#FFD400", "position": "top"},
     "zoom": {"enabled": True, "strength": 0.10},
     # gaming / stream layout: face-cam panel + gameplay panel

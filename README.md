@@ -147,6 +147,8 @@ Framing **Auto** (default) does what an editor would:
 - **Speaker focus:** in a wide shot, the camera cuts to whoever is talking. The voice is matched to the face by lip movement.
 - **Game streams (face-cam + gameplay):** when a scene is gameplay with a small webcam, Auto switches to the **Gaming** layout. The face-cam is cropped into its own panel and the gameplay fills the other. In Editor → Layout you choose face-cam on top or bottom, its size and zoom, and gameplay *Fill* (crop the centre) or *Fit* (whole screen over a blur). Pick **Gaming** to use it for the whole clip.
 - **Screen share, replays:** when nobody is on screen, that scene shows the whole frame over a blurred background.
+- **Webcam detection on streams:** the face-cam is found as a box that stays put for the whole clip, even when it is tiny and the gameplay changes every second. The box edges come from averaging edges over time: the border stays sharp while gameplay blurs out. The face-cam panel is cropped inside that box, so no gameplay leaks in.
+- **Context banner:** the AI writes one line per clip saying what it is about, using the video's title for the game or topic (for example "Streamer RANTS Console vs PC Fragpunk"). In gaming and split-screen clips it sits on the seam for the whole clip, and captions move into the gameplay. Change it in Editor → Title.
 
 Captions switch colour when the speaker changes. Turn this off, or pick each speaker's colour,
 in Editor → Captions. Test material: `python tools/make_podcast_fixture.py` builds a
