@@ -18,9 +18,13 @@ from opusclip.config import settings
 def main() -> int:
     ap = argparse.ArgumentParser(description="Turn long video into short vertical clips.")
     ap.add_argument("input", help="local video file or URL")
-    ap.add_argument("--clips", type=int, default=settings.max_clips, help="how many clips")
+    ap.add_argument("--clips", type=int, default=0,
+                    help="how many clips (0 = auto: about one per 3.5 min, more if the video has them)")
     ap.add_argument("--length", default="ai", choices=list(pipeline.LENGTHS),
                     help="ai (default) lets the AI pick each clip's length")
+    ap.add_argument("--format", default="short", choices=["short", "long", "both"],
+                    help="short = vertical clips, long = 16:9 YouTube videos (~10 min), both")
+    ap.add_argument("--long-len", type=float, default=None, help="long videos: target length in seconds")
     ap.add_argument("--style", default=settings.caption_style, choices=list(PRESETS))
     ap.add_argument("--aspect", default="9:16", choices=["9:16", "1:1", "4:5", "16:9"])
     ap.add_argument("--layout", default="auto", choices=["auto", "track", "center", "fit"])
@@ -46,6 +50,7 @@ def main() -> int:
 
     opts = {
         "clips": args.clips, "length": args.length, "preset": args.style, "aspect": args.aspect,
+        "format": args.format, "long_len": args.long_len,
         "layout": args.layout, "whisper_model": args.model, "language": args.lang,
         "provider": args.provider, "llm_model": args.llm_model, "topic": args.topic,
         "captions": not args.no_captions, "zoom": not args.no_zoom, "silence": args.remove_silence, "quality": args.quality,
@@ -61,7 +66,10 @@ def main() -> int:
     print("\n=== DONE ===" if p.status == "done" else f"\n=== {p.status.upper()}: {p.error} ===")
     for c in sorted(p.clips, key=lambda c: c.rank):
         s = f"{c.score.total} {c.score.grade}" if c.score else "?"
-        print(f"  #{c.rank} {c.start:7.1f}-{c.end:7.1f} ({c.duration:4.1f}s)  score {s:7}  {c.title}")
+        print(f"  #{c.rank} [{c.kind}] {c.start:7.1f}-{c.end:7.1f} ({c.duration:4.1f}s)  score {s:7}  {c.title}")
+        pk = c.package or {}
+        if pk.get("yt_title"):
+            print(f"       YouTube: {pk['yt_title']}  |  thumbnail: {pk.get('thumbnail_text', '')}")
         if c.file:
             print(f"       {out / c.file}   [{c.render.get('seconds')}s, {c.render.get('encoder')}]")
     print("timings:", p.timings)

@@ -173,7 +173,28 @@ section.tight { padding-top: var(--section-gap-s); }
 footer { margin-top: var(--section-gap); padding-block: var(--space-xl); border-top: 1px solid var(--color-rule); display: flex; justify-content: space-between; gap: var(--space-lg); flex-wrap: wrap; font-size: var(--text-sm); color: var(--color-muted); }
 footer p { max-width: 70ch; }
 
+
+/* prompt guide */
+.formula { display: flex; flex-wrap: wrap; gap: var(--space-xs); margin-bottom: var(--space-2xl); }
+.formula span { padding: var(--space-xs) var(--space-sm); border: 1px solid var(--color-rule-2); font-size: var(--text-sm); color: var(--color-ink-2); }
+.formula b { color: var(--color-ink); font-weight: 500; }
+.pgroups { display: grid; gap: var(--space-2xl); }
+.pgroup h3 { margin-bottom: var(--space-md); }
+.pgroup > p { color: var(--color-ink-2); max-width: 60ch; margin-bottom: var(--space-md); }
+.prompts { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-md); }
+.prompts li { display: grid; gap: var(--space-xs); padding: var(--space-md); background: var(--color-paper-2); box-shadow: inset 0 0 0 1px var(--color-outline); }
+.prompts q { quotes: none; font-size: var(--text-md); color: var(--color-ink); line-height: 1.45; overflow-wrap: anywhere; }
+.prompts q::before { content: "\201C"; color: var(--color-accent); }
+.prompts q::after { content: "\201D"; color: var(--color-accent); }
+.prompts .does { font-size: var(--text-sm); color: var(--color-muted); }
+.prompts .copy-p { justify-self: start; min-height: 32px; padding: 0 var(--space-sm); font: inherit; font-size: var(--text-sm); background: none; color: var(--color-ink-2); border: 1px solid var(--color-rule-2); cursor: pointer; }
+.prompts .copy-p:hover { color: var(--color-ink); border-color: var(--color-accent); }
+.gets { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gap-columns); margin-top: var(--space-2xl); }
+.gets div { padding-top: var(--space-md); border-top: 1px solid var(--color-rule); }
+.gets dt { font-weight: 500; margin-bottom: var(--space-2xs); }
+.gets dd { margin: 0; color: var(--color-ink-2); font-size: var(--text-sm); }
 @media (max-width: 60rem) {
+  .prompts, .gets { grid-template-columns: minmax(0, 1fr); }
   .nav ul { display: none; }
   .hero .copy, .ba, .split, .band .inner, .final, .game { grid-template-columns: minmax(0, 1fr); }
   .game-clip { max-width: 320px; }
@@ -205,6 +226,7 @@ footer p { max-width: 70ch; }
       <li><a href="#clips">Example clips</a></li>
       <li><a href="#gaming">Gaming</a></li>
       <li><a href="#how">How it works</a></li>
+      <li><a href="#prompts">Prompt guide</a></li>
       <li><a href="#online">Why not online</a></li>
     </ul>
     <a class="btn btn--secondary" href="/download">Download</a>
@@ -304,6 +326,87 @@ footer p { max-width: 70ch; }
     </ol>
   </section>
 
+  <section id="prompts" class="wrap">
+    <div class="head">
+      <h2>Prompt guide: say what to cut</h2>
+      <p class="lead">Open Agent in the app, paste a link or attach a video, and write what you want the way you would tell an editor.</p>
+    </div>
+    <div class="formula" aria-label="What a request can say">
+      <span><b>the video</b> link or file</span><span><b>format</b> shorts, long videos or both</span>
+      <span><b>length</b> under 45 s, 10 minutes</span><span><b>how many</b> 5 clips</span>
+      <span><b>which part</b> from 1:20:00</span><span><b>what kind of moment</b> only the funny parts</span>
+      <span><b>look</b> face-cam on top, karaoke captions</span>
+    </div>
+    <div class="pgroups">
+      <div class="pgroup">
+        <h3>Shorts from any video</h3>
+        <p>Vertical clips, 12 seconds to 3 minutes. Each clip is as long as its moment unless you give a length.</p>
+        <ul class="prompts">
+          <li><q>Turn this into Shorts with captions: https://youtu.be/…</q><span class="does">Every moment worth a clip, ranked, captioned, vertical.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Clip this podcast into clips under 45 seconds, only the parts about money</q><span class="does">A length cap plus a topic: off-topic moments are dropped.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Give me the 5 funniest moments, 30 to 60 second clips, karaoke captions</q><span class="does">A count, a length range and a caption style.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Only the clutch plays and rage moments, face-cam on top</q><span class="does">Game streams: the face-cam panel over the gameplay.</span><button class="copy-p" type="button">Copy</button></li>
+        </ul>
+      </div>
+      <div class="pgroup">
+        <h3>Long videos from long streams</h3>
+        <p>A 9-hour Kick stream or a 3-hour podcast is not only shorts. Ask for long videos and you get standalone 16:9 YouTube videos of about 10 minutes, each with a start that grabs and a payoff, dead stretches cut out.</p>
+        <ul class="prompts">
+          <li><q>Make 10 minute YouTube videos from this Kick stream: https://kick.com/…</q><span class="does">Standalone long videos built from the whole stream's story.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Make 3 long videos and shorts too from this stream</q><span class="does">Both formats from one upload.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Best-of compilation, about 12 minutes, only the scary moments</q><span class="does">One long video around the kind of moment you name.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Make long videos from the last 3 hours of the stream</q><span class="does">Only that part is searched.</span><button class="copy-p" type="button">Copy</button></li>
+        </ul>
+      </div>
+      <div class="pgroup">
+        <h3>Podcasts and interviews</h3>
+        <p>Name what the guest said or what the talk is about; the clip starts on its setup and ends on the answer.</p>
+        <ul class="prompts">
+          <li><q>Every time the guest says something shocking about money</q><span class="does">Moments matched to your words, not just the loudest ones.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Clips where he talks about his childhood, under a minute</q><span class="does">A topic plus a length.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Make a 15 minute long video of the best story from this podcast</q><span class="does">One long video with chapters and a description.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Only the arguments, 1 to 2 minute clips</q><span class="does">Shorts can run up to 3 minutes when the story needs it.</span><button class="copy-p" type="button">Copy</button></li>
+        </ul>
+      </div>
+      <div class="pgroup">
+        <h3>Only part of a video</h3>
+        <p>Point at a time, a range, or the start or end of the video.</p>
+        <ul class="prompts">
+          <li><q>Clip from 1:20:00 to the end</q><span class="does">Starts searching at 1 hour 20 minutes.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Between 10:00 and 25:00, every time someone gets voted out</q><span class="does">A range plus a repeating event.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Skip the first 10 minutes, clip the rest</q><span class="does">Leaves out the intro.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>Only the first 30 minutes, 8 clips</q><span class="does">A part plus a count.</span><button class="copy-p" type="button">Copy</button></li>
+        </ul>
+      </div>
+      <div class="pgroup">
+        <h3>Hindi and Hinglish work too</h3>
+        <p>Write the way you talk. Titles for Hindi videos come in Hinglish.</p>
+        <ul class="prompts">
+          <li><q>Is stream ke best moments ki 12 minute ki lambi video aur shorts dono bana do</q><span class="does">Long videos of about 12 minutes plus shorts.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>सिर्फ मज़ेदार पल, 45 सेकंड से कम</q><span class="does">Only the funny moments, under 45 seconds.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>sirf funny moments, 1 minute tak ke clips</q><span class="does">Only the funny moments, clips up to a minute.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>इस पॉडकास्ट की 10 मिनट की लंबी वीडियो बना दो</q><span class="does">Long videos of about 10 minutes from a podcast.</span><button class="copy-p" type="button">Copy</button></li>
+        </ul>
+      </div>
+      <div class="pgroup">
+        <h3>Then keep talking</h3>
+        <p>After the clips are found you pick which to make, or just say it.</p>
+        <ul class="prompts">
+          <li><q>make 3</q><span class="does">Makes the 3 best clips found.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>make all</q><span class="does">Makes every clip found.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>only the funny ones</q><span class="does">Finds clips again on the same transcript, in seconds.</span><button class="copy-p" type="button">Copy</button></li>
+          <li><q>shorter, under 20 seconds</q><span class="does">Same video, new length. Everything else you asked for stays.</span><button class="copy-p" type="button">Copy</button></li>
+        </ul>
+      </div>
+    </div>
+    <dl class="gets">
+      <div><dt>A YouTube title</dt><dd>Written knowing the whole video: who it is, the game or topic, what was at stake.</dd></div>
+      <div><dt>Thumbnail text</dt><dd>Two to four words for the thumbnail, the moment's emotional core.</dd></div>
+      <div><dt>A description</dt><dd>Who, what happens and why to watch. Long videos also get chapters.</dd></div>
+      <div><dt>Moments that land</dt><dd>It maps where people get loud, laugh or react across the whole video, and which setups pay off later.</dd></div>
+    </dl>
+  </section>
+
   <section class="wrap tight">
     <dl class="rows">
       <div><dt>Captions</dt><dd>Eight animated styles, keyword colours and a different colour for each speaker.</dd></div>
@@ -345,5 +448,17 @@ footer p { max-width: 70ch; }
   <p>Example clips were made by ClipForge from a NASA video of astronaut Don Pettit (public domain); NASA does not endorse ClipForge. The game example uses <a href="https://www.youtube.com/watch?v=NPHfewLSdBU">“The Most AGGRESSIVE Sonar PLAYER”</a> by Iphiclus, licensed <a href="https://creativecommons.org/licenses/by/3.0/">CC BY</a>, cut by ClipForge with the streamer hidden behind a dummy for this page.</p>
   <a href="https://github.com/himanshuhs9011/opus-clip-clone">Source code on GitHub</a>
 </footer>
+<script>
+document.querySelectorAll(".copy-p").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var q = b.parentElement.querySelector("q");
+    if (!q || !navigator.clipboard) return;
+    navigator.clipboard.writeText(q.textContent).then(function () {
+      b.textContent = "Copied";
+      setTimeout(function () { b.textContent = "Copy"; }, 1300);
+    }, function () {});
+  });
+});
+</script>
 </body>
 </html>

@@ -23,6 +23,7 @@ export function Header({ health, onSettings }: { health: Health | null; onSettin
       </a>
       <nav className="top-nav">
         <a href="#/">Projects</a>
+        <a href="#/agent">Agent</a>
       </nav>
       <div className="top-right">
         {health && (

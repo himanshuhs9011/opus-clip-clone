@@ -18,6 +18,7 @@ python run.py video.mp4 --clips 6
 | Ingest | upload or YouTube link (yt-dlp), ffprobe, 16 kHz audio, browser proxy for the editor | `pipeline.py`, `text.py` |
 | Transcribe | faster-whisper on CUDA (batched), word timestamps, CPU fallback, transcript reused on re-run | `text.py` |
 | Find highlights | sentence-aligned candidate windows → heuristic prefilter → LLM ranking, window by window so long podcasts are fully covered | `highlights.py` |
+| Clip edges & length | every pick's start and end are reviewed like an editor would (see below), so each clip is as long as its moment | `boundaries.py` |
 | Virality score | 0–100 + letter grade, five sub-scores (Hook, Flow, Value, Emotion, Trend), every signal listed; LLM and measured signals blended 45/55 | `score.py` |
 | Speakers | voice fingerprints (WeSpeaker ONNX) clustered into "who talks when"; every word gets a speaker | `speakers.py` |
 | Reframe | YuNet faces + SFace face fingerprints link people across camera angles; lip motion matches each voice to a face; the camera cuts to whoever is talking (min 1 s shots), two-person wide shots become a split screen, blur-fit when nobody is on screen | `reframe.py` |
@@ -27,8 +28,9 @@ python run.py video.mp4 --clips 6
 
 ## The app
 
-* **Home**: paste a link or drop a file and choose clip length (auto, under 30 s, 30–60 s, 60–90 s),
-  clip count, aspect, caption template, AI provider, framing and effects.
+* **Home**: paste a link or drop a file and choose clip count (Auto by default), quality bar, aspect,
+  caption template, AI provider, framing and effects. Clip length is never a setting: each clip
+  is as long as its moment (12–90 s).
 * **Project**: clips ranked by virality score, each with score ring, grade, sub-score bars,
   the signals behind the score, risks and hashtags. Download one clip or all of them (ZIP with
   title and hashtag `.txt` files).
@@ -89,6 +91,98 @@ a white flash into the full clip. Toggle it per project or per clip.
 50 / 50, Bubble (round face-cam with a white ring over full gameplay), Card (framed face-cam in a corner)
 and Gameplay only. The context banner moves with the template.
 
+## Whole-video understanding, long videos, ready-to-post text
+
+Picking clips one transcript window at a time misses what an editor knows. Before any clip
+is cut, `opusclip/story.py` builds this context once per video (cached for Re-run):
+
+- **Engagement map:** every second scored from loudness spikes against the video's own level,
+  sudden jumps, bursts of fast talk, exclamations, reaction phrases ("no way", "are you
+  serious", "bhai kya"), laughter, and fast back-and-forth between speakers. The AI sees
+  `[HYPE]` / `[hot]` on those lines, and a clip holding one of the video's top peaks scores higher.
+- **Story log** (videos over 6 minutes): the video in ~5-minute parts. The AI writes what
+  happens in each (names, game events, claims), tags it (funny, clutch, argument, reveal,
+  shock...), rates it 1-10, and notes setups that pay off later. Then a brief of the whole video:
+  who, what, the running storylines. Every clip-finding prompt gets the brief and what happens
+  around that part, so a 4-hour stream is understood as one story.
+- **Format:** *Shorts* (vertical, 12 s to 3 min, each as long as its moment), *Long videos*
+  (standalone 16:9 YouTube videos of about 10 min, set with `long_len`) or *Both*. A long video is
+  a run of parts with a start that grabs and a payoff; its edges move onto natural pauses, quiet
+  wordless stretches (AFK, loading) are cut out, and it opens on a teaser of its best moment.
+  About one long video per 40 minutes of source.
+- **Ready to post:** every clip gets a YouTube title, 2-4 words of thumbnail text and a
+  description (long videos also get chapters), written with the whole-video brief. They show
+  under each clip with copy buttons and go into the ZIP's `.txt` files.
+
+Without an AI all of this still runs on the engagement map and transcript, with simpler text.
+
+## Clip Agent (say what you want)
+
+**Agent** in the top bar (`#/agent`) takes a request in plain words, with a link or an
+attached file:
+
+> Clip the last hour of this stream into 5 clips under 45 seconds, only the rage moments, face-cam on top
+
+1. **Plan:** it shows what it understood (count, length, which part of the video, what kind of
+   moment, layout) as steps you approve, or change.
+2. **Find:** transcript and clip finding run as usual, but nothing is rendered yet.
+3. **Pick:** found clips are listed with their score, time range and why they were picked.
+   The best few are pre-selected; *Make N clips* or *Make all*.
+4. **Make:** only the picked clips are reframed, captioned and rendered.
+
+Keep talking to it about the same video: "make 3", "make all", "only the funny ones",
+"shorter, under 20 seconds". A new ask re-finds clips on the same transcript (fast) and keeps
+what you said before unless you change it.
+
+How a request is read (`opusclip/wizard.py`, rules first, so it works with Rules only too):
+
+| You say | It means |
+|---|---|
+| "under 60 seconds", "30 second clips", "2 minute clips" | the longest a clip may be; the picker aims at it and stretches a pick up to 20 % short while the speech runs on |
+| "at least a minute", "15-30 second clips" | a minimum (and maximum) |
+| "Shorts", "Reels", "TikTok" | vertical, no length |
+| "about 10 clips", "top 5" | how many (otherwise Auto) |
+| "from 1:20:00", "between 10:00 and 25:00", "the last hour", "skip the first 10 minutes" | only that part is searched |
+| "only the biggest laughs", "every time someone gets voted out", "moments about pricing" | the kind of moment: it beats general virality. "Viral", "best" or "good hooks" are not a kind |
+| "face-cam on top", "no captions", "karaoke captions", "square" | layout and style |
+
+When the rules find no kind of moment but the request has more words, the AI is asked for it
+(25 s at most, so the plan never hangs on a cold model).
+
+API: `POST /api/agent/plan`, `POST /api/agent/start`, `POST /api/agent/followup`,
+`POST /api/projects/{id}/finish` (render picked clips). Projects waiting for picks have
+status `picking` and clips with render status `candidate`; the Project page shows a
+*Make this clip* button on those.
+
+## How a clip's length is decided
+
+There is no length setting. The AI proposes each clip from the transcript, using a length
+rubric by kind of moment: a punchline, reaction or hot take is 12–25 s, a tip or answer
+20–45 s, a story or argument that keeps tension 45–90 s. Then `opusclip/boundaries.py`
+reviews both edges of every pick:
+
+- **Opening:** never mid-sentence (Whisper splits long sentences into 20-word units, so the
+  start moves back to the real sentence start). Lead-in banter ("No. No? Ah!", "Yeah.") and
+  channel plugs are skipped. A first line that continues something unseen ("But the main
+  reason…", "That's why…", "As I said…", "He told me…") gets its setup sentence added back,
+  or is trimmed when it is a short throwaway.
+- **Ending:** a real question gets its answer; an unfinished sentence runs on to its full stop;
+  a payoff line right after ("And that's why…", "Turns out…") is kept; a long question after
+  the answer (the next topic starting) and trailing chatter or sign-offs are cut.
+- **Too short:** a pick up to 25 % under the minimum is lengthened while the speech runs on,
+  instead of being thrown away.
+- **Cut points:** 0.05 s before the first word and 0.12 s after the last one, never into a
+  neighbouring word.
+
+Game streams without an AI review get their length from the hype curve: the moment starts
+on the build-up and ends when the reaction has died down for 4 s, so a quick fail is ~15 s
+and a long fight ~45 s.
+
+**How many clips (Auto):** about one per 3.5 minutes is the target. A video with more strong
+moments keeps up to half as many again, but only clips scoring 70+ (or 7 over the quality
+bar); a weak video keeps at least half the target if near-misses exist. Channel intros and
+plugs are never kept just to make up the number.
+
 ## Windows installer
 
 `ClipForge-Setup.exe` is a normal setup wizard: Welcome → folder → options → optional
@@ -140,7 +234,8 @@ UI development with hot reload: run the API (`python -m uvicorn app:app --port 8
 ## CLI
 
 ```bash
-python run.py podcast.mp4 --clips 6 --length medium --style beast
+python run.py podcast.mp4 --clips 6 --style beast          # length: AI per clip (default)
+python run.py podcast.mp4 --length medium                   # force 30-60 s clips
 python run.py "https://youtube.com/watch?v=..." --provider openrouter --aspect 1:1
 python run.py talk.mp4 --provider none --model small --remove-silence
 ```
@@ -193,6 +288,9 @@ two-voice, multi-camera podcast at `fixtures/podcast2.mp4`.
 
 - `config/scoring.json`: sub-score weights.
 - `opusclip/score.py`: lexicons and thresholds behind every signal.
+- `opusclip/boundaries.py`: the opening / ending rules and cut padding.
+
+Tests: `python -m pytest tests`.
 - `opusclip/captions.py`: `PRESETS` (font, colours, animation, words per caption).
 - `opusclip/edit.py`: filler list, silence threshold, emoji map, zoom rhythm.
 - `.env`: `RENDER_WORKERS`, `ENCODER`, `CRF`, `REFRAME_SAMPLE_FPS`.

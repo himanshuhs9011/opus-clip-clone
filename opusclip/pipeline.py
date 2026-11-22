@@ -20,6 +20,7 @@ from .models import Clip, Project
 from .probe import probe, run as run_cmd
 from .reframe import covers, track
 from .speakers import diarize
+from .story import STORY_VERSION, build_story, engagement_map, package_clips
 from .render import encoder_name, render_clip
 from . import remote
 from .text import build_sentences, download, transcribe
@@ -27,9 +28,10 @@ from .text import build_sentences, download, transcribe
 PID_RE = re.compile(r"^[0-9a-f]{8}$")
 CID_RE = re.compile(r"^clip_\d{2,3}$")
 
-# "ai" = the AI picks each clip's length from the content (only platform limits apply).
+# "ai" = each clip's length follows its content (the AI's pick, then the boundary review in
+# boundaries.py); only platform limits apply. 12 s is the shortest moment with a payoff.
 # The fixed ranges stay for the command line only.
-LENGTHS = {"ai": (8.0, 90.0), "short": (12.0, 30.0), "medium": (30.0, 60.0), "long": (60.0, 90.0)}
+LENGTHS = {"ai": (12.0, 180.0), "short": (12.0, 30.0), "medium": (30.0, 60.0), "long": (60.0, 90.0)}
 
 # quality bar: clips scoring below it are dropped instead of padding the clip count
 QUALITY = {"any": 0, "good": 65, "viral": 75}
@@ -56,6 +58,15 @@ DEFAULT_OPTIONS: dict = {
     "progress": False,
     "silence": False,
     "fillers": False,
+    # Clip Agent (wizard.py) - all optional
+    "focus": "",                # only this kind of moment ("the biggest laughs")
+    "max_clip": None,           # longest a clip may be (s); the picker aims at it
+    "min_clip": None,           # shortest a clip may be (s)
+    "range": None,              # {"from", "to", "last"}: the part of the video to search
+    "pick": False,              # find only; the user picks which clips get rendered
+    # short = vertical clips (12 s - 3 min) | long = standalone 16:9 YouTube episodes | both
+    "format": "short",
+    "long_len": None,           # long episodes: target length in seconds (default 600)
 }
 
 _live: dict[str, Project] = {}
@@ -79,6 +90,32 @@ def normalize_options(opts: dict | None) -> dict:
         o["quality"] = "good"
     if o["length"] not in LENGTHS:
         o["length"] = "ai"   # includes the old "auto" setting
+    o["focus"] = str(o.get("focus") or "").strip()[:1500]
+    for k, lo_, hi_ in (("max_clip", 10, 180), ("min_clip", 10, 180)):
+        try:
+            o[k] = float(max(lo_, min(hi_, float(o[k])))) if o.get(k) not in (None, "", 0) else None
+        except (TypeError, ValueError):
+            o[k] = None
+    if o["max_clip"] and o["min_clip"] and o["min_clip"] > o["max_clip"]:
+        o["min_clip"] = o["max_clip"]
+    r = o.get("range")
+    if isinstance(r, dict):
+        def num(v):
+            try:
+                return None if v in (None, "") else max(0.0, float(v))
+            except (TypeError, ValueError):
+                return None
+        r = {k: num(r.get(k)) for k in ("from", "to", "last")}
+        o["range"] = r if any(v is not None for v in r.values()) else None
+    else:
+        o["range"] = None
+    o["pick"] = bool(o.get("pick"))
+    if o.get("format") not in ("short", "long", "both"):
+        o["format"] = "short"
+    try:
+        o["long_len"] = float(max(180, min(1800, float(o["long_len"])))) if o.get("long_len") else None
+    except (TypeError, ValueError):
+        o["long_len"] = None
     if not o["provider"]:
         from .providers import active
 
@@ -120,6 +157,71 @@ def auto_clip_count(duration: float) -> int:
     return int(max(2, min(20, round(minutes / 3.5) + 1)))
 
 
+def _story_for(p: Project, emap, llm: LLM, context: str, log) -> dict | None:
+    """The story log for this video, built once and reused on Re-run (same transcript).
+    Short videos (under 6 min) are one moment-dense piece and need none."""
+    if (p.duration or 0) < 360:
+        return None
+    key = f"{len(p.sentences)}:{round(p.sentences[-1].end)}"
+    old = p.settings.get("story") or {}
+    if (old.get("key") == key and old.get("version") == STORY_VERSION
+            and (old.get("by") == "ai" or not llm.available)):
+        log("story log: reusing the one built last time")
+        return old
+    story = build_story(p.sentences, emap, p.duration, llm, context=context, language=p.language, log=log)
+    story["key"] = key
+    p.settings["story"] = story
+    return story
+
+
+def _peak_intro(emap, sentences, a: float, b: float) -> list[float]:
+    """Cold-open teaser for an episode: ~4 s around its most intense second."""
+    import numpy as np
+
+    seg = emap[int(a) : max(int(a) + 1, min(len(emap), int(b)))] if len(emap) else []
+    if not len(seg):
+        return []
+    t = int(a) + int(np.argmax(seg))
+    words = [w for s in sentences if s.end >= t - 3 and s.start <= t + 5 for w in s.words if t - 2.5 <= w.start <= t + 4.5]
+    h0 = (words[0].start - 0.05) if words else t - 1.5
+    h1 = (words[-1].end + 0.15) if words else t + 2.5
+    h1 = min(h1, h0 + 5.0)
+    return [round(max(a, h0), 3), round(min(b, max(h1, h0 + 2.0)), 3)] if b - a > 30 else []
+
+
+def _long_clips(p: Project, o: dict, sents, emap, story, llm: LLM, context: str, searched: float,
+                start_index: int, log) -> list[Clip]:
+    """Standalone long YouTube episodes from the story log (format long / both)."""
+    from .edit import hashtags_for
+    from .score import grade, score_span
+    from .story import long_select, peak_rank
+
+    target = o.get("long_len") or 600.0
+    lo_l, hi_l = max(180.0, target * 0.6), min(1800.0, target * 1.5)
+    if o.get("format") == "long" and o.get("clips"):
+        kl = int(o["clips"])
+    else:      # about one episode per 40 minutes of source, 1-8
+        kl = int(max(1, min(8, round(searched / (target * 4)) or 1)))
+    picks = long_select(sents, emap, story, llm, kl, lo=lo_l, hi=hi_l, target=target, context=context,
+                        language=p.language, focus=o.get("focus") or "", log=log)
+    out = []
+    for i, x in enumerate(picks):
+        sc = score_span(x["text"][:20000], x["words"], x["end"] - x["start"], x["start"], x["end"], None)
+        pr = peak_rank(emap, x["start"], x["end"])
+        sc.total = int(round(0.5 * x["rating"] + 0.3 * pr * 100 + 0.2 * sc.total))
+        sc.grade = grade(sc.total)
+        sc.source = "story"
+        sc.features["energy_peak"] = round(pr, 2)
+        sc.reasons = [f"Long episode: {x['why']}"[:160]] + sc.reasons[:2]
+        sc.risks = [r for r in sc.risks if "Long for a short" not in r][:3]
+        out.append(Clip(
+            id=f"clip_{start_index + i:02d}", start=x["start"], end=x["end"], title=x["title"][:120],
+            summary=x["summary"], why=x["why"], hashtags=hashtags_for(x["text"][:20000]),
+            intro=_peak_intro(emap, sents, x["start"], x["end"]), skips=x["skips"], score=sc,
+            rank=start_index + i, kind="long", package=x["package"]))
+    return out
+
+
 def edit_from_options(o: dict) -> dict:
     return merge_edit(None, {
         "aspect": o["aspect"],
@@ -157,8 +259,17 @@ def save(p: Project) -> None:
     d = project_dir(p.id)
     d.mkdir(parents=True, exist_ok=True)
     with lock(p.id):
-        data = json.dumps(p.to_dict(), ensure_ascii=False,
-                          default=lambda o: o.item() if hasattr(o, "item") else str(o))
+        # render threads update clip.render while another thread saves; serialising a dict
+        # that changes size mid-way raises RuntimeError, so take a fresh snapshot and retry
+        for attempt in range(4):
+            try:
+                data = json.dumps(p.to_dict(), ensure_ascii=False,
+                                  default=lambda o: o.item() if hasattr(o, "item") else str(o))
+                break
+            except RuntimeError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.01)
         tmp = d / "project.json.tmp"
         tmp.write_text(data, encoding="utf-8")
         for _ in range(5):
@@ -476,10 +587,37 @@ def run(p: Project, source: Path, log=None) -> Project:
                 save(p)
 
             lo, hi = LENGTHS[o["length"]]
-            if p.duration < lo * 1.5:      # short source: allow shorter clips
-                lo = max(5.0, min(lo, p.duration * 0.5))
-                hi = max(lo + 5, min(hi, p.duration))
+            target = None
+            if o.get("max_clip") or o.get("min_clip"):
+                # the user named a length: the longest is a hard cap the picker aims at,
+                # a minimum is a floor; otherwise the platform limits stay
+                hi = o["max_clip"] or min(180.0, max(hi, o["min_clip"] * 1.5))
+                lo = o["min_clip"] or min(lo, hi * 0.8)
+                target = o.get("max_clip")
+                log(f"clip length: {lo:.0f}-{hi:.0f}s" + (f", aiming at {target:.0f}s" if target else ""))
+
+            # the part of the video the user asked for ("from 1:20:00", "the last hour")
+            from .wizard import resolve_range
+
+            span = resolve_range(o.get("range"), p.duration)
+            sents = p.sentences
+            if span:
+                sents = [copy.copy(s) for s in p.sentences
+                         if s.start >= span[0] - 0.01 and s.end <= span[1] + 0.01]
+                for i, s in enumerate(sents):
+                    s.id = i           # selection indexes sentences by id
+                log(f"searching {span[0] / 60:.1f}-{span[1] / 60:.1f} min only ({len(sents)} sentences)")
+                if not sents:
+                    raise RuntimeError("no speech in the part of the video you asked for")
+            searched = (span[1] - span[0]) if span else p.duration
+
+            if searched < lo * 1.5:      # short source: allow shorter clips
+                lo = max(5.0, min(lo, searched * 0.5))
+                hi = max(lo + 5, min(hi, searched))
             context = (p.remote or {}).get("title") or p.name
+            if (p.remote or {}).get("channel"):
+                # the channel names the streamer / show (speech recognition mangles names)
+                context = f"{context} (channel: {p.remote['channel']})"
             from .gaming import is_gaming
 
             gaming = o.get("content") == "gaming" or (
@@ -487,14 +625,40 @@ def run(p: Project, source: Path, log=None) -> Project:
             p.settings["content"] = "gaming" if gaming else "talk"
             if gaming:
                 log("game stream detected: using the gaming agent")
-            k = o["clips"] or auto_clip_count(p.duration)
+            k = o["clips"] or auto_clip_count(searched)
             if not o["clips"]:
-                log(f"clip count: auto, {k} clips for {p.duration / 60:.0f} min")
-            clips, model = select(p.sentences, audio, topic=o["topic"], k=k, context=context,
-                                  gaming=gaming, language=p.language, duration=p.duration,
-                                  weights=settings.scoring_weights(), log=sel_log,
-                                  min_len=lo, max_len=hi, llm=llm,
-                                  min_score=QUALITY[o["quality"]])
+                log(f"clip count: auto, {k} clips for {searched / 60:.0f} min")
+            if o.get("focus"):
+                log(f"looking only for: {o['focus'][:120]}")
+
+            # whole-video understanding: where it gets intense, what happens, what pays off
+            setp("analyse", 0.49, "Understanding the whole video")
+            emap = engagement_map(audio, p.sentences, p.duration)
+            story = _story_for(p, emap, llm, context, sel_log)
+            if story and span:
+                story = {**story, "parts": [x for x in story["parts"]
+                                            if x["t1"] > span[0] and x["t0"] < span[1]]}
+            setp("analyse", 0.52, "Finding highlights")
+
+            fmt = o.get("format") or "short"
+            clips: list[Clip] = []
+            model = "rules"
+            if fmt in ("short", "both"):
+                clips, model = select(sents, audio, topic=o["topic"], k=k, context=context,
+                                      gaming=gaming, language=p.language, duration=p.duration,
+                                      weights=settings.scoring_weights(), log=sel_log,
+                                      min_len=lo, max_len=hi, llm=llm,
+                                      min_score=QUALITY[o["quality"]], auto_count=not o["clips"],
+                                      focus=o.get("focus") or "", target=target, span=span,
+                                      emap=emap, story=story)
+            if fmt in ("long", "both") and story:
+                long_clips = _long_clips(p, o, sents, emap, story, llm, context, searched,
+                                         start_index=len(clips) + 1, log=sel_log)
+                clips = clips + long_clips
+                if long_clips and fmt == "long":
+                    model = f"story ({llm.label})" if llm.available else "story (rules)"
+            setp("analyse", 0.57, "Writing titles and thumbnail text")
+            package_clips(clips, story, llm, context=context, language=p.language, log=sel_log)
             if llm.provider == "ollama":
                 unload_ollama()   # give the GPU back to the renderer
             mark("select", t0)
@@ -504,9 +668,16 @@ def run(p: Project, source: Path, log=None) -> Project:
         base_edit = edit_from_options(o)
         for c in clips:
             c.edit = copy.deepcopy(base_edit)
+            if c.kind == "long":
+                # a YouTube episode: the whole 16:9 frame, a teaser of its best moment first,
+                # no burned-in captions or hook title (the platform shows the title)
+                c.edit = merge_edit(c.edit, {"aspect": "16:9", "layout": "fit",
+                                             "captions": {"enabled": False}, "title": {"enabled": False},
+                                             "zoom": {"enabled": False}, "intro": {"enabled": True}})
             if c.skips:            # the AI's cuts inside the clip (loading screens, dead air)
                 c.edit.setdefault("cuts", {})["ranges"] = [list(x) for x in c.skips]
-            c.render = {"status": "queued", "progress": 0.0}
+            # pick mode: found, not made yet - the user chooses which clips get rendered
+            c.render = {"status": "candidate"} if o["pick"] else {"status": "queued", "progress": 0.0}
         p.clips = clips
         p.settings["selector"] = model
         p.settings["quality"] = {"bar": QUALITY[o["quality"]], "level": o["quality"],
@@ -518,6 +689,18 @@ def run(p: Project, source: Path, log=None) -> Project:
             wav.unlink(missing_ok=True)
         except OSError:
             pass
+
+        if o["pick"]:
+            if prev_th is not None:            # the editor / pick previews play this
+                prev_th.join(timeout=600)
+                p.preview = preview_box.get("name")
+            timings["total"] = round(time.time() - t_start, 2)
+            p.timings = timings
+            p.status, p.stage, p.progress = "picking", "pick", 1.0
+            p.message = f"Found {len(clips)} clips - pick the ones to make"
+            save(p)
+            log(p.message)
+            return p
 
         # ------------------------------------------------ track + render (parallel)
         t0 = time.time()
@@ -555,11 +738,12 @@ def run(p: Project, source: Path, log=None) -> Project:
 def _update_render_progress(p: Project) -> None:
     if p.status != "running":
         return
-    fr = [float((c.render or {}).get("progress") or (1.0 if c.file else 0.0)) for c in p.clips]
+    fr = [float((c.render or {}).get("progress") or (1.0 if c.file else 0.0)) for c in p.clips
+          if (c.render or {}).get("status") != "candidate"]       # not picked: not being made
     if fr:
         p.progress = 0.60 + 0.395 * (sum(fr) / len(fr))
         done = sum(1 for c in p.clips if (c.render or {}).get("status") == "done")
-        p.message = f"Rendered {done}/{len(p.clips)} clips"
+        p.message = f"Rendered {done}/{len(fr)} clips"
 
 
 def _track_and_render(p: Project, clip: Clip, log=None) -> None:
@@ -674,6 +858,47 @@ def queue_render(pid: str, cid: str) -> Clip | None:
     return clip
 
 
+def finish(pid: str, ids: list[str] | None) -> Project | None:
+    """Make the clips the user picked (None = all found). Others stay as candidates."""
+    p = get(pid)
+    if not p:
+        return None
+    with lock(pid):
+        if p.status in ("running", "queued"):
+            raise RuntimeError("still working - wait for it to finish")
+        want = set(ids) if ids is not None else {c.id for c in p.clips}
+        todo = [c for c in p.clips if c.id in want and not c.file
+                and (c.render or {}).get("status") in ("candidate", "error", None)]
+        if not todo:
+            return p
+        for c in todo:
+            c.render = {"status": "queued", "progress": 0.0}
+        p.status, p.stage, p.progress = "running", "render", 0.6
+        p.error = None
+        p.message = f"Making {len(todo)} clip{'s' if len(todo) != 1 else ''}"
+    save(p)
+
+    def job() -> None:
+        t0 = time.time()
+        wait([_render_pool.submit(_track_and_render, p, c) for c in todo])
+        with lock(pid):
+            made = sum(1 for c in todo if c.file and (c.render or {}).get("status") == "done")
+            left = sum(1 for c in p.clips if (c.render or {}).get("status") == "candidate")
+            p.timings = {**(p.timings or {}), "render": round(time.time() - t0, 2)}
+            if made or not todo:
+                p.status = "picking" if left else "done"
+                p.stage = "pick" if left else "done"
+            else:
+                p.status, p.stage = "error", "error"
+                p.error = next((c.render.get("error") for c in todo if c.render.get("error")), "render failed")
+            p.progress = 1.0
+            p.message = f"{made} clip{'s' if made != 1 else ''} made" + (f", {left} more to pick from" if left else "")
+        save(p)
+
+    _job_pool.submit(job)
+    return p
+
+
 def apply_to_all(pid: str, patch: dict, render: bool = True) -> Project | None:
     """Apply a style (captions/layout/effects) to every clip, keeping each clip's own trims/cuts."""
     p = get(pid)
@@ -690,7 +915,8 @@ def apply_to_all(pid: str, patch: dict, render: bool = True) -> Project | None:
     save(p)
     if render:
         for c in p.clips:
-            queue_render(pid, c.id)
+            if (c.render or {}).get("status") != "candidate":   # not picked: style only
+                queue_render(pid, c.id)
     return p
 
 

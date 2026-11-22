@@ -76,6 +76,20 @@ export function OptionsForm({
           </div>
         </div>
         <div className="opt">
+          <span className="field-label">Format</span>
+          <div className="seg">
+            {([
+              ["short", "Shorts", "Vertical clips, 12 s to 3 min, each as long as its moment"],
+              ["long", "Long videos", "Standalone 16:9 YouTube videos of about 10 min, built from the whole video's story"],
+              ["both", "Both", "Shorts and long videos from the same upload"],
+            ] as ["short" | "long" | "both", string, string][]).map(([id, label, hint]) => (
+              <button key={id} type="button" title={hint} className={(value.format ?? "short") === id ? "sel" : ""} onClick={() => set("format", id)}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="opt">
           <span className="field-label">Quality bar</span>
           <div className="seg">
             {([

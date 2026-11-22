@@ -67,8 +67,34 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
     return max(lo, min(hi, x))
 
 
+_PHRASE_RE: dict[tuple, re.Pattern] = {}
+
+
 def _count_phrases(text: str, phrases: list[str]) -> int:
-    return sum(text.count(p) for p in phrases)
+    """Whole-word phrase hits. Plain substring counting matched "link" in "think",
+    "but" in "button" and "tip" in "multiple", which inflated value / quotability."""
+    key = tuple(phrases)
+    pat = _PHRASE_RE.get(key)
+    if pat is None:
+        alts = "|".join(re.escape(p) for p in sorted(phrases, key=len, reverse=True))
+        pat = _PHRASE_RE[key] = re.compile(rf"(?<![\w'])(?:{alts})(?![\w'])")
+    return len(pat.findall(text))
+
+
+# Housekeeping that is never a good short: channel plugs, sponsor reads, wrap-ups and
+# "we'll be right back" (often over a slate). Penalised so rules-only mode skips them too.
+HOUSEKEEPING = re.compile(
+    r"\b(subscribe|sub button|like button|hit (that|the) (like|bell)|smash (that|the) like|"
+    r"notification bell|link (is )?in (the|my) (description|bio)|use (my )?code|promo code|"
+    r"today'?s sponsor|sponsored by|brought to you by|thanks for watching|thank you for watching|"
+    r"see you (guys )?(in the )?next (video|time|one)|let you go|before we (go|wrap)|"
+    r"thanks? (you )?(so much |very much )?for (coming|having me|joining|tuning in|the time|your time)|"
+    r"in today'?s (video|episode|stream)|"
+    r"what'?s (good|up) (youtube|guys|everyone)|"
+    r"wrap (this|it) up|we'?ll be right back|technical (difficulties|issues)|can you hear me|"
+    r"is my (mic|audio)|welcome back to (the|my) (channel|stream|show))\b",
+    re.I,
+)
 
 
 def _sentences_from_words(words: list[Word]) -> list[str]:
@@ -148,6 +174,10 @@ def analyse(text: str, words: list[Word], duration: float, t0: float, t1: float,
     elif audio is not None:
         hook -= 12
         hit(risks, 12, "Dead air at the start - viewers scroll in the first 2 seconds")
+    house = len(HOUSEKEEPING.findall(text))
+    if house:
+        hook -= min(30, 15 * house)
+        hit(risks, 15 * house, "Channel plug / sponsor / wrap-up talk - not a standalone moment")
     hook = _clamp(hook)
 
     # ----------------------------------------------------------- retention
@@ -242,6 +272,8 @@ def analyse(text: str, words: list[Word], duration: float, t0: float, t1: float,
         val += 6
     if len(re.findall(r"\b(first|second|third|three|two|one)\b", low)) >= 2:
         val += 6
+    if house:
+        val -= min(24, 12 * house)
     val = _clamp(val)
 
     # --------------------------------------------------------- quotability
@@ -285,6 +317,7 @@ def analyse(text: str, words: list[Word], duration: float, t0: float, t1: float,
             "intensity_hits": intensity,
             "unique_ratio": round(unique, 3),
             "questions": questions,
+            "housekeeping": house,
         },
     }
 

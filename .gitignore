@@ -17,3 +17,4 @@ fixtures/*.wav
 clipforge.ico
 .wrangler/
 site/.wrangler/
+.pytest_cache/

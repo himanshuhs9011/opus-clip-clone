@@ -4,6 +4,7 @@ import {
 } from "lucide-react";
 import { api, media, type Clip, type Health, type Options, type Presets, type Project as P } from "../api";
 import { OptionsForm } from "../components/OptionsForm";
+import { PackageBox } from "../components/PackageBox";
 import { ScoreBadge, ScoreRing, SubScores } from "../components/Score";
 import { Modal } from "../components/SettingsModal";
 import { fmtDuration, fmtTime, go, slug, useInterval } from "../lib/util";
@@ -50,6 +51,7 @@ export function ProjectPage({ id, presets, health }: { id: string; presets: Pres
     sort === "score" ? (b.score?.total ?? 0) - (a.score?.total ?? 0) : a.start - b.start,
   );
   const stageIdx = ORDER.indexOf(p.stage);
+  const cands = clips.filter((c) => c.render?.status === "candidate");
   const selector = p.settings?.selector;
 
   return (
@@ -74,7 +76,12 @@ export function ProjectPage({ id, presets, health }: { id: string; presets: Pres
           </div>
         </div>
         <div className="head-actions">
-          {p.status === "done" && clips.some((c) => c.file) && (
+          {cands.length > 0 && !busy && (
+            <button className="btn primary" onClick={async () => { await api.finish(p.id, cands.map((c) => c.id)); load(); }}>
+              <Scissors size={15} /> Make {cands.length} found clip{cands.length === 1 ? "" : "s"}
+            </button>
+          )}
+          {(p.status === "done" || p.status === "picking") && clips.some((c) => c.file) && (
             <a className="btn ghost" href={`/api/projects/${p.id}/zip`}>
               <Download size={15} /> All clips
             </a>
@@ -187,7 +194,7 @@ function ClipRow({ p, c, position, onChange }: { p: P; c: Clip; position: number
   };
 
   return (
-    <div className="clip-row card">
+    <div className={`clip-row card ${c.kind === "long" ? "is-long" : ""}`}>
       <div className="clip-player">
         {c.file ? (
           <video key={src} src={src} poster={media(p.id, c.thumb, c.version)} controls preload="none" playsInline />
@@ -195,6 +202,16 @@ function ClipRow({ p, c, position, onChange }: { p: P; c: Clip; position: number
           <div className="clip-ph">
             {r.status === "error" ? (
               <span className="err-text"><AlertTriangle size={16} /> render failed</span>
+            ) : r.status === "candidate" ? (
+              <button
+                className="btn primary"
+                onClick={async () => {
+                  await api.finish(p.id, [c.id]);
+                  onChange();
+                }}
+              >
+                <Scissors size={15} /> Make this clip
+              </button>
             ) : (
               <Loader2 className="spin" />
             )}
@@ -206,6 +223,7 @@ function ClipRow({ p, c, position, onChange }: { p: P; c: Clip; position: number
           </div>
         )}
         <span className="rank">#{position}</span>
+        {c.kind === "long" && <span className="kind-badge">Long · {Math.round(c.duration / 60)} min</span>}
       </div>
 
       <div className="clip-info">
@@ -225,6 +243,8 @@ function ClipRow({ p, c, position, onChange }: { p: P; c: Clip; position: number
         {sc && <SubScores score={sc} />}
 
         {(c.why || c.summary) && <p className="clip-why">{c.why || c.summary}</p>}
+
+        <PackageBox c={c} />
 
         {sc && (sc.reasons.length > 0 || sc.risks.length > 0) && (
           <div className="signals">

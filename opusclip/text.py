@@ -259,7 +259,10 @@ def build_sentences(segments: list[dict], max_words: int = 20, max_gap: float = 
     # merge stubs into the next/previous unit
     merged: list[dict] = []
     for u in units:
-        if merged and len(u["text"].split()) < 4 and u["end"] - u["start"] < 1.2:
+        # a stub only joins the sentence right before it: merging across a long pause made
+        # that sentence (and every clip ending on it) run through the dead air
+        if (merged and len(u["text"].split()) < 4 and u["end"] - u["start"] < 1.2
+                and u["start"] - merged[-1]["end"] <= max_gap):
             prev = merged[-1]
             prev["words"].extend(u["words"])
             prev["end"] = u["end"]

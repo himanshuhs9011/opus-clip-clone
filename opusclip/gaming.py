@@ -64,7 +64,10 @@ def hype_map(audio: AudioFeatures, sentences: list[Sentence], duration: float) -
         rms = np.pad(rms, (0, n * per - rms.size))
     sec = rms.reshape(n, per)
     loud = sec.max(axis=1)                        # loudest moment of each second
-    base = np.convolve(loud, np.ones(120) / 120, mode="same")   # stream's own level, 2 min
+    # stream's own level over ~2 min. The window must not be longer than the stream:
+    # mode="same" returns max(len(a), len(v)) samples, which broke streams under 2 minutes.
+    win = max(1, min(120, n))
+    base = np.convolve(loud, np.ones(win) / win, mode="same")
     spike = np.clip(loud - base, 0, None)
     jump = np.clip(np.diff(loud, prepend=loud[0]), 0, None)
 
@@ -78,15 +81,17 @@ def hype_map(audio: AudioFeatures, sentences: list[Sentence], duration: float) -
                 t = _norm(w.text)
                 if t in HYPE_WORDS or w.text.strip().endswith(("!", "?")):
                     excl[i] += 1
-    burst = np.convolve(talk, np.ones(4), mode="same")
-    excl = np.convolve(excl, np.ones(4), mode="same")
+    k4 = np.ones(min(4, n))
+    burst = np.convolve(talk, k4, mode="same")
+    excl = np.convolve(excl, k4, mode="same")
 
     def z(x: np.ndarray) -> np.ndarray:
         sd = float(np.std(x)) or 1.0
         return np.clip((x - float(np.mean(x))) / sd, 0, 4) / 4
 
     score = 0.38 * z(spike) + 0.17 * z(jump) + 0.25 * z(burst) + 0.20 * z(excl)
-    return np.convolve(score, np.ones(5) / 5, mode="same")
+    k5 = min(5, n)
+    return np.convolve(score, np.ones(k5) / k5, mode="same")
 
 
 def pick_peaks(score: np.ndarray, k: int, min_gap: int = 45, skip_edges: int = 30) -> list[int]:
@@ -101,6 +106,43 @@ def pick_peaks(score: np.ndarray, k: int, min_gap: int = 45, skip_edges: int = 3
         if len(out) >= k:
             break
     return sorted(out)
+
+
+def hype_envelope(score: np.ndarray, t: float, lo: float, hi: float,
+                  lead: float = 8.0, tail: float = 4.0) -> tuple[float, float]:
+    """Where a sound peak's moment begins and ends, read from the hype curve.
+
+    A fixed window around every peak makes every clip the same length. Real moments are
+    not: a quick reaction dies in 5 s, a fight stays hot for 40. Walk outwards from the
+    peak while the hype stays above ~35 % of the peak (short dips allowed), then add a
+    few seconds of setup before and the reaction after.
+    """
+    n = len(score)
+    if n == 0:
+        return lo, hi
+    i = min(n - 1, max(0, int(t)))
+    thr = max(0.10, float(score[i]) * 0.35)
+    calm_needed = 4                         # seconds below the bar that end the moment
+
+    a = i
+    calm = 0
+    while a > max(0, int(lo)):
+        a -= 1
+        calm = calm + 1 if score[a] < thr else 0
+        if calm >= calm_needed:
+            a += calm_needed
+            break
+    b = i
+    calm = 0
+    while b < min(n - 1, int(hi)):
+        b += 1
+        calm = calm + 1 if score[b] < thr else 0
+        if calm >= calm_needed:
+            b -= calm_needed
+            break
+    start = max(lo, min(t - 8.0, a - lead), t - 35.0)     # always some setup
+    end = min(hi, max(t + 5.0, b + tail), t + 25.0)       # and the reaction
+    return float(start), float(end)
 
 
 def _words_between(sentences: list[Sentence], a: float, b: float) -> list[Word]:
@@ -134,6 +176,9 @@ For EACH candidate decide:
 - type: one of funny, clutch, fail, rage, reaction, story, hype
 - start, end (seconds): begin on the setup (what leads up to it), end right after the
   reaction. 12-60 s. Never start mid-sentence if you can avoid it.
+  The length follows the moment, never a habit: a quick fail, scare or one-line joke is
+  12-20 s; a clutch, chase or fight that stays hot is 25-45 s; a story told on stream is
+  30-60 s. End when the reaction dies down, not when a timer runs out.
 - what: one sentence, what happens
 - title: max 8 words
 - banner: on-screen line, max 12 words: who + what happens + the game, ONE key word in CAPS
@@ -335,9 +380,15 @@ def _intro(r: dict | None, a: float, b: float, score: np.ndarray) -> list[float]
 
 def agent_select(sentences: list[Sentence], audio: AudioFeatures, duration: float, k: int,
                  llm: LLM | None, context: str = "", language: str = "", log=None,
-                 min_len: float = 12.0, max_len: float = 60.0) -> list[dict]:
-    """Returns picks shaped like highlights.llm_select output (plus 'gaming': True)."""
+                 min_len: float = 12.0, max_len: float = 60.0, focus: str = "",
+                 span: tuple[float, float] | None = None) -> list[dict]:
+    """Returns picks shaped like highlights.llm_select output (plus 'gaming': True).
+    ``span`` limits the search to part of the stream; ``focus`` is the kind of moment wanted."""
     score = hype_map(audio, sentences, duration)
+    if span:                                  # only the part the user asked for
+        score = score.copy()
+        score[: max(0, int(span[0]))] = 0.0
+        score[min(len(score), int(span[1]) + 1):] = 0.0
     peaks = pick_peaks(score, max(12, min(k * 3, 60)))
     if log:
         log(f"gaming agent: {len(peaks)} hype peaks found in {duration / 60:.0f} min")
@@ -345,27 +396,33 @@ def agent_select(sentences: list[Sentence], audio: AudioFeatures, duration: floa
     lang = LANG.get((language or "en")[:2], f"the transcript's language ({language})")
 
     n_moments = max(12, min(30, k + 6))
-    ov: dict = overview(sentences, score, llm, context, lang, log, n_moments) if use_llm else {}
+    ov: dict = overview(sentences, score, llm, context + (f" | the user wants only: {focus}" if focus else ""),
+                        lang, log, n_moments) if use_llm else {}
     times = [(float(t), "peak") for t in peaks]
     for m in (ov.get("moments") or [])[:n_moments]:
         try:
             t = float(m.get("t"))
         except (TypeError, ValueError, AttributeError):
             continue
-        if 30 <= t <= duration - 20 and all(abs(t - x) >= 40 for x, _ in times):
+        inside = span is None or span[0] <= t <= span[1]
+        if inside and 30 <= t <= duration - 20 and all(abs(t - x) >= 40 for x, _ in times):
             times.append((t, "story"))
     if log and len(times) > len(peaks):
         log(f"gaming agent: +{len(times) - len(peaks)} moments the AI found in the talk")
     times.sort()
 
     cands = []
+    floor, ceil = (span if span else (0.0, duration))
     for i, (t, src) in enumerate(times):
-        lo, hi = max(0.0, t - 40.0), min(duration, t + 25.0)
+        lo, hi = max(floor, t - 40.0), min(ceil, t + 25.0)
         if src == "story":                       # talk moments: the payoff is after the line
-            lo, hi = max(0.0, t - 25.0), min(duration, t + 40.0)
+            lo, hi = max(floor, t - 25.0), min(ceil, t + 40.0)
         ti = min(len(score) - 1, int(t))
-        cands.append({"id": i, "peak": t, "lo": lo, "hi": hi, "src": src,
-                      "a": max(lo, t - 18.0), "b": min(hi, t + 12.0),
+        if src == "peak":
+            a0, b0 = hype_envelope(score, t, lo, hi)   # length follows the moment itself
+        else:
+            a0, b0 = max(lo, t - 18.0), min(hi, t + 12.0)
+        cands.append({"id": i, "peak": t, "lo": lo, "hi": hi, "src": src, "a": a0, "b": b0,
                       "hype": float(max(score[ti], 0.3 if src == "story" else 0.0))})
 
     reviewed: dict[int, dict] = {}
@@ -383,7 +440,9 @@ def agent_select(sentences: list[Sentence], audio: AudioFeatures, duration: floa
                       f"at {c['peak']:.0f}s, window {c['lo']:.0f}-{c['hi']:.0f}s)\n"
                       + _context(sentences, score, c["lo"], c["hi"]) for c in group]
             ids = ", ".join(str(c["id"]) for c in group)
-            user = ((f"STREAM TITLE: {context}\n" if context else "") + stream + "\n\n".join(blocks)
+            want = (f"THE USER ASKED ONLY FOR: {focus}\nkeep: true only for moments that match it.\n\n"
+                    if focus else "")
+            user = ((f"STREAM TITLE: {context}\n" if context else "") + stream + want + "\n\n".join(blocks)
                     + f"\n\nReview every candidate ({ids}): one entry per id, even when keep is false.{note}")
             try:
                 data = llm.json_completion(system, user, schema=AGENT_SCHEMA, max_tokens=3000,
@@ -429,7 +488,10 @@ def agent_select(sentences: list[Sentence], audio: AudioFeatures, duration: floa
     picks = []
     for c in cands:
         r = reviewed.get(c["id"])
-        if r is not None and not r.get("keep", True):
+        keep = (r or {}).get("keep", True)
+        if isinstance(keep, str):            # some models answer "false" as a string
+            keep = keep.strip().lower() not in ("false", "no", "0", "")
+        if r is not None and not keep:
             continue
         if r is None and reviewed:
             continue                     # the agent never vouched for it

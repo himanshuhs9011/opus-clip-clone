@@ -51,7 +51,8 @@ export interface Edit {
 }
 
 export interface RenderState {
-  status?: "queued" | "rendering" | "done" | "error";
+  // candidate: found by the Clip Agent, not made yet (the user picks which get rendered)
+  status?: "candidate" | "queued" | "rendering" | "done" | "error";
   progress?: number;
   error?: string;
   seconds?: number;
@@ -81,6 +82,16 @@ export interface Clip {
   edit: Partial<Edit>;
   render: RenderState;
   error: string | null;
+  kind?: "short" | "long";
+  package?: ClipPackage;
+}
+
+/** Ready-to-post text written with the whole video in mind (opusclip/story.py). */
+export interface ClipPackage {
+  yt_title?: string;
+  thumbnail_text?: string;
+  description?: string;
+  chapters?: [number, string][];
 }
 
 export interface Word {
@@ -102,7 +113,8 @@ export interface Project {
   id: string;
   name: string;
   created: number;
-  status: "queued" | "running" | "done" | "error";
+  // picking: clips were found and wait for the user to pick which to make
+  status: "queued" | "running" | "picking" | "done" | "error";
   stage: string;
   message: string;
   progress: number;
@@ -155,6 +167,47 @@ export interface Options {
   progress: boolean;
   silence: boolean;
   fillers: boolean;
+  focus?: string;
+  max_clip?: number | null;
+  min_clip?: number | null;
+  range?: AgentRange | null;
+  pick?: boolean;
+  format?: "short" | "long" | "both";
+  long_len?: number | null;
+}
+
+// Clip Agent (opusclip/wizard.py)
+export interface AgentRange {
+  from: number | null;
+  to: number | null;
+  last: number | null;
+}
+
+export interface AgentRequest {
+  text: string;
+  url: string | null;
+  focus: string;
+  focus_by?: "ai";
+  max_clip: number | null;
+  min_clip: number | null;
+  count: number | null;
+  range: AgentRange | null;
+  content: "auto" | "talk" | "gaming";
+  stream_template: StreamTemplate | null;
+  aspect: Edit["aspect"] | null;
+  captions: boolean | null;
+  preset: string | null;
+  quality: Options["quality"] | null;
+  make: "all" | number | null;
+  format?: "short" | "long" | "both";
+  long_len?: number | null;
+}
+
+export interface AgentPlan {
+  summary: string;
+  steps: { title: string; detail: string }[];
+  questions: string[];
+  ready: boolean;
 }
 
 export interface CaptionPreset {
@@ -374,6 +427,12 @@ export const api = {
     req<Clip>(`/api/projects/${pid}/clips/${cid}/render`, { method: "POST" }),
   plan: (pid: string, cid: string, edit: Edit | null, signal?: AbortSignal) =>
     req<Plan>(`/api/projects/${pid}/clips/${cid}/plan`, { ...json("POST", { edit }), signal }),
+  agentPlan: (text: string, has_file: boolean) =>
+    req<{ request: AgentRequest; plan: AgentPlan }>("/api/agent/plan", json("POST", { text, has_file })),
+  agentFollowup: (pid: string, text: string) =>
+    req<{ action: "make" | "refind"; ids?: string[]; request?: AgentRequest; plan?: AgentPlan }>(
+      "/api/agent/followup", json("POST", { pid, text })),
+  finish: (pid: string, ids: string[] | null) => req<{ id: string; status: string }>(`/api/projects/${pid}/finish`, json("POST", { ids })),
   applyAll: (pid: string, edit: Partial<Edit>, render = true) =>
     req<{ ok: boolean }>(`/api/projects/${pid}/apply-all`, json("POST", { edit, render })),
 };

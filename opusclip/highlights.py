@@ -6,6 +6,8 @@ import numpy as np
 from dataclasses import dataclass
 
 from .audio import AudioFeatures
+from .boundaries import (can_stretch, focus_hits, focus_terms, is_banter, is_punctuated,
+                         mid_sentence, opening_issue, padded_edges, review, stretch_to)
 from .config import settings
 from .edit import hashtags_for
 from .llm import LLM, LLMError
@@ -41,10 +43,13 @@ def build_candidates(sentences: list[Sentence], min_len: float, max_len: float) 
     targets = [t for t in (12, 18, 25, 32, 40, 50, 62, 75, 88) if lo <= t <= hi]
     targets = targets or [round((lo + hi) / 2)]
     targets = sorted({min(t, max(span, lo)) for t in targets})
+    punctuated = is_punctuated(sentences)
 
     for i in range(n):
         if i > 0 and len(tokens(sentences[i].text)) < 3:
             continue
+        if mid_sentence(sentences, i, punctuated):
+            continue          # a window never opens in the middle of a sentence
         for target in targets:
             j = i
             while j + 1 < n and (sentences[j].end - sentences[i].start) < target:
@@ -83,8 +88,13 @@ def prefilter(cands: list[Candidate], sentences: list[Sentence], audio: AudioFea
 # --------------------------------------------------------------------------
 # LLM ranking
 # --------------------------------------------------------------------------
-def _transcript_block(sentences: list[Sentence]) -> str:
-    return "\n".join(f"{s.id}|{s.start:6.1f}|{s.text.strip()}" for s in sentences)
+def _transcript_block(sentences: list[Sentence], emap=None) -> str:
+    """sentence_id|start|[mark] text - [HYPE] / [hot] where this video's energy peaks."""
+    from .story import levels, mark
+
+    lv = levels(emap) if emap is not None else (1.1, 1.1)
+    return "\n".join(f"{s.id}|{s.start:6.1f}|{mark(emap, s.start, s.end, lv)}{s.text.strip()}"
+                     for s in sentences)
 
 
 def _windows(sentences: list[Sentence], max_chars: int, overlap: float) -> list[list[Sentence]]:
@@ -113,16 +123,27 @@ SYSTEM = """You are the clip curator inside a video repurposing engine (like Opu
 You read a timestamped transcript and choose the strongest standalone short-form clips.
 
 Rules:
-- A clip must be self-contained: a viewer with zero context understands it.
+- A clip must be self-contained: a viewer with zero context understands and cares.
+- Prefer a complete mini-story or argument: setup, tension or claim, specific detail, payoff.
 - The FIRST sentence must work as a hook (question, bold claim, number, conflict, curiosity gap).
-- Prefer a complete idea with a payoff; never cut mid-thought.
-- YOU decide each clip's length from the content, for TikTok / Reels / Shorts:
-  start on the hook, end right after the payoff or punchline. Never pad with filler,
-  setup or the next topic to make it longer; never chop the idea to make it shorter.
-  A tight 15-30s clip beats a 60s one that drags; go long (up to 90s) only for a
-  story that keeps tension the whole way. Lengths should differ clip to clip.
+  Never start on a filler (um, like, well), a bare agreement (yeah, right, exactly), a
+  conjunction that continues an earlier point ("But...", "And then...", "That's why..."),
+  a back-reference ("as I said", "that point") or a pronoun for someone not yet named.
+  If the moment needs the sentence before it, start on that sentence.
+- END on the last sentence that lands the point. Never stop mid-thought, never on an
+  unanswered question, never keep the opening words of the next topic.
+- YOU decide each clip's length from the content, for TikTok / Reels / Shorts. The kind
+  of moment sets the length:
+    punchline, reaction, one-liner, hot take ........ 12-25 s
+    tip, answer, insight, quick rant ................ 20-45 s
+    story, argument, step-by-step that keeps tension  45-90 s
+    a full story that holds tension all the way ....... up to 180 s (rare)
+  Start on the hook (or the minimum setup it needs), end right after the payoff. Never pad
+  with filler or the next topic to make it longer; never chop the idea to make it shorter.
+  Lengths should differ clip to clip, because moments differ.
 - Prefer emotional, specific, contrarian or highly actionable moments.
-- Skip intros, sponsor reads and "like and subscribe".
+- Skip intros, sponsor reads, "like and subscribe", wrap-ups and goodbyes, and passages where
+  the speech says the picture is broken ("we'll be right back", technical problems).
 - Do not pick overlapping clips. Maximise variety across topics.
 
 The "banner" is shown on screen for the whole clip so a scrolling viewer instantly knows
@@ -177,21 +198,37 @@ SCHEMA = {
 }
 
 
-def _normalize_scores(raw: dict) -> dict:
-    """Models return 0-1, 0-10 or 0-100 depending on mood. Normalise to 0-100."""
+def _scale_for(values) -> float:
+    """Models answer on 0-1, 0-10 or 0-100 depending on mood. Infer the scale from the
+    whole answer, not one number: a harsh 8/100 must not turn into 80/100."""
+    nums = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not nums:
+        return 1.0
+    mx = max(nums)
+    if mx <= 1.5:
+        return 100.0
+    if mx <= 10.0:
+        return 10.0
+    return 1.0
+
+
+def _raw_scores(raw: dict) -> dict:
     vals: dict[str, float] = {}
     for k in _SCORE_KEYS:
         v = raw.get(k, raw.get(k.title()))
-        if isinstance(v, (int, float)):
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
             vals[k] = float(v)
+    return vals
+
+
+def _normalize_scores(raw: dict, scale: float | None = None) -> dict:
+    """Sub-scores to 0-100. Pass ``scale`` (from _scale_for over the whole answer) when
+    known; without it the scale is guessed from this clip's own numbers."""
+    vals = _raw_scores(raw)
     if not vals:
         return {}
-    mx = max(vals.values())
-    if mx <= 1.5:
-        vals = {k: v * 100 for k, v in vals.items()}
-    elif mx <= 10.0:
-        vals = {k: v * 10 for k, v in vals.items()}
-    return {k: max(0.0, min(100.0, v)) for k, v in vals.items()}
+    s = _scale_for(vals.values()) if scale is None else scale
+    return {k: max(0.0, min(100.0, v * s)) for k, v in vals.items()}
 
 
 def _clean_tags(tags) -> list[str]:
@@ -221,9 +258,17 @@ def _fatal(e: Exception) -> bool:
 
 def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topic: str,
                k: int, log, min_len: float, max_len: float, context: str = "",
-               language: str = "") -> list[dict]:
-    """Ask the LLM window by window, then turn its sentence ranges into picks."""
-    windows = _windows(sentences, llm.context_chars - 2500, overlap=max_len)
+               language: str = "", focus: str = "", target: float | None = None,
+               emap=None, story: dict | None = None) -> list[dict]:
+    """Ask the LLM window by window, then turn its sentence ranges into picks.
+
+    ``focus``: the kind of moment the user asked for; relevance to it beats general virality.
+    ``target``: the length the user asked for (the longest a clip may be); the AI aims at it."""
+    from .story import brief_text, parts_near
+
+    brief = brief_text(story)
+    room = 2500 + (len(brief) + 900 if story else 0)
+    windows = _windows(sentences, max(4000, llm.context_chars - room), overlap=max_len)
     total = max(1.0, sentences[-1].end - sentences[0].start)
     n = len(sentences)
     picks: list[dict] = []
@@ -239,13 +284,25 @@ def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topi
         user = (
             (f"NICHE / TOPIC: {topic}\n\n" if topic else "")
             + (f"VIDEO TITLE (use it for the game / topic / who is speaking): {context}\n" if context else "")
-            + f"Clip length: your call per clip (hard limits {min_len:.0f}-{max_len:.0f} s).\n"
+            + (f"Clip length: the user asked for clips up to {target:.0f} s. Aim close to it "
+               f"(never longer); {min_len:.0f} s is the shortest.\n" if target else
+               f"Clip length: your call per clip (hard limits {min_len:.0f}-{max_len:.0f} s).\n")
+            + (f"THE USER ASKED ONLY FOR: {focus}\nPick only clips that match this request; "
+               "matching it matters more than general virality. If nothing in this part matches, "
+               "return {\"clips\": []}.\n" if focus else "")
             + _language_rule(language) + "\n\n"
-            + "TRANSCRIPT (sentence_id|start_seconds|text):\n"
-            + _transcript_block(win)
+            + (f"WHOLE VIDEO (for context - who these people are, what is going on):\n{brief}\n\n"
+               if brief else "")
+            + (f"WHAT HAPPENS AROUND THIS PART:\n{parts_near(story, win[0].start, win[-1].end, pad=60)[:900]}\n\n"
+               if story else "")
+            + "TRANSCRIPT (sentence_id|start_seconds|text). [HYPE] / [hot] mark where the energy in "
+              "the room peaks (loud, fast, reactions, laughter): the moments people react to are "
+              "usually there, but a clip must still start on its setup and end after the payoff.\n"
+            + _transcript_block(win, emap)
             + (f"\n\nHigh-scoring windows from a cheap pre-filter (hints, not limits):\n{hints}"
                if hints else "")
-            + f"\n\nPick the best {per} clips. start_sid/end_sid must be sentence ids above."
+            + f"\n\nPick the best {per} clips (fewer only if this part truly has fewer moments "
+            "that stand alone). start_sid/end_sid must be sentence ids above."
         )
         if log:
             log(f"AI ({llm.label}) reading part {wi}/{len(windows)}")
@@ -258,7 +315,9 @@ def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topi
             if failures >= 2 or len(windows) == 1 or _fatal(e):
                 break
             continue
-        for item in data.get("clips", []) or []:
+        items = [x for x in (data.get("clips", []) or []) if isinstance(x, dict)]
+        scale = _scale_for([v for x in items for v in _raw_scores(x.get("scores") or {}).values()])
+        for item in items:
             try:
                 a = int(item["start_sid"])
                 b = int(item["end_sid"])
@@ -269,12 +328,13 @@ def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topi
             if b < a:
                 a, b = b, a
             start, end, words = sentence_span(sentences, a, b)
-            # keep the AI's own length - no padding with extra sentences. Only enforce the
-            # platform limits: too short to be a clip, or longer than a short can be.
+            # keep the AI's own length. Only the platform limits apply: longer than a short
+            # can be is trimmed; a little short is kept here and lengthened by the boundary
+            # review while the speech runs on; much shorter is no clip.
             while (end - start) > max_len + 3 and b > a:
                 b -= 1
                 start, end, words = sentence_span(sentences, a, b)
-            if end - start < min_len or end - start > max_len + 3:
+            if not can_stretch(end - start, min_len) or end - start > max_len + 3:
                 continue
             picks.append({
                 "start_sid": a, "end_sid": b, "start": start, "end": end, "words": words,
@@ -285,7 +345,7 @@ def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topi
                 "summary": str(item.get("summary") or "").strip()[:400],
                 "why": str(item.get("why") or "").strip()[:400],
                 "hashtags": _clean_tags(item.get("hashtags")),
-                "scores": _normalize_scores(item.get("scores") or {}),
+                "scores": _normalize_scores(item.get("scores") or {}, scale),
                 "risks": [str(r) for r in (item.get("risks") or [])][:3],
             })
     return picks
@@ -364,7 +424,8 @@ def heuristic_select(cands: list[Candidate], sentences: list[Sentence], k: int) 
 # virality: hook tightening + a harsh comparative AI judge
 # --------------------------------------------------------------------------
 def _tighten_hook(p: dict, sc: Score, sentences: list[Sentence], audio: AudioFeatures,
-                  weights: dict | None, min_len: float) -> tuple[dict, Score]:
+                  weights: dict | None, min_len: float,
+                  punctuated: bool = True) -> tuple[dict, Score]:
     """If the first sentence is a weak opener, try starting 1-2 sentences later.
     Keep the variant whose first seconds hook harder without losing overall score."""
     a, b = p["start_sid"], p["end_sid"]
@@ -375,6 +436,9 @@ def _tighten_hook(p: dict, sc: Score, sentences: list[Sentence], audio: AudioFea
         s, e, words = sentence_span(sentences, a2, b)
         if e - s < min_len:
             break
+        if (opening_issue(sentences[a2].text) or is_banter(sentences[a2].text)
+                or mid_sentence(sentences, a2, punctuated)):
+            continue          # a later start that needs the lines we would cut is no hook
         text = " ".join(x.text for x in sentences[a2 : b + 1])
         sc2 = score_span(text, words, e - s, s, e, audio, weights=weights,
                          llm_subscores=p.get("scores") or None)
@@ -472,7 +536,8 @@ def auto_intro(p: dict, audio: AudioFeatures, length: float = 3.2) -> list[float
     return [round(max(a, h0), 3), round(min(b, h1), 3)]
 
 
-def viral_judge(shortlist: list[tuple[dict, Score]], llm: LLM, topic: str, log=None) -> None:
+def viral_judge(shortlist: list[tuple[dict, Score]], llm: LLM, topic: str, log=None,
+                focus: str = "") -> None:
     """Second AI pass: rank the shortlist side by side and blend that into each score."""
     blocks = []
     per = int(max(200, min(900, (llm.context_chars - 3000) / max(1, len(shortlist)))))
@@ -483,6 +548,8 @@ def viral_judge(shortlist: list[tuple[dict, Score]], llm: LLM, topic: str, log=N
         what = f"WHAT HAPPENS: {p['summary']} | " if p.get("gaming") and p.get("summary") else ""
         blocks.append(f"[{i}] ({p['end'] - p['start']:.0f}s) {what}{text}")
     user = ((f"Channel niche: {topic}\n\n" if topic else "")
+            + (f"The user asked only for: {focus}\nA clip that does not match that gets a low "
+               "number and verdict skip, however good it is otherwise.\n\n" if focus else "")
             + "Candidate clips (id, length, transcript):\n\n" + "\n\n".join(blocks)
             + "\n\nJudge every clip.")
     if log:
@@ -500,14 +567,16 @@ def viral_judge(shortlist: list[tuple[dict, Score]], llm: LLM, topic: str, log=N
             verdicts[int(item["id"])] = item
         except (KeyError, TypeError, ValueError):
             continue
+    # one scale for the whole answer: judging per number turned a harsh 8/100 into 80/100
+    scale = _scale_for([v.get("viral") for v in verdicts.values()])
     for i, (p, sc) in enumerate(shortlist):
         v = verdicts.get(i)
         if not v:
             continue
         raw = v.get("viral")
-        viral = float(raw) if isinstance(raw, (int, float)) else 50.0
-        viral = viral * 10 if viral <= 10 else viral
-        viral = max(0.0, min(100.0, viral))
+        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+            continue                      # no number: leave this clip's score alone
+        viral = max(0.0, min(100.0, float(raw) * scale))
         total = 0.6 * sc.total + 0.4 * viral
         reason = str(v.get("reason") or "").strip()[:160]
         if str(v.get("verdict")).lower() == "skip":
@@ -538,8 +607,22 @@ def select(
     gaming: bool = False,
     language: str = "",
     duration: float = 0.0,
+    auto_count: bool = False,
+    focus: str = "",
+    target: float | None = None,
+    span: tuple[float, float] | None = None,
+    emap=None,
+    story: dict | None = None,
 ) -> tuple[list[Clip], str]:
+    """Pick, review and rank clips.
+
+    ``auto_count``: k is a target, not a cap - a video with more strong moments keeps up to
+    half as many again (clips that clear the quality bar by a clear margin), the way a human
+    editor clips every moment a video deserves rather than a fixed number.
+    ``focus``: only this kind of moment (the user's words). ``target``: the clip length the
+    user asked for. ``span``: (start, end) of the part of the video to search."""
     k = k or settings.max_clips
+    k_max = min(20, max(k, round(k * 1.5))) if auto_count else k
     min_len = settings.min_clip if min_len is None else min_len
     max_len = settings.max_clip if max_len is None else max_len
     if not sentences:
@@ -557,7 +640,7 @@ def select(
 
         picks = agent_select(sentences, audio, duration or sentences[-1].end, k, llm, context=context,
                              language=language, log=log, min_len=max(10.0, min_len * 0.7),
-                             max_len=min(60.0, max_len))
+                             max_len=min(max(60.0, target or 0.0), max_len), focus=focus, span=span)
         model = f"gaming agent ({llm.label})" if llm is not None and llm.available else "gaming agent (rules)"
         talky = sum(len(s.words) for s in sentences) / max(1.0, (duration or sentences[-1].end) / 60) >= 25
         if llm is not None and llm.available and talky and len(picks) < k * 2:
@@ -566,21 +649,80 @@ def select(
             if log:
                 log(f"gaming agent found {len(picks)}; also reading the talk for story clips")
             talk = llm_select(sentences, cands, llm, topic, k, log, min_len, max_len, context=context,
-                              language=language)
+                              language=language, focus=focus, target=target, emap=emap, story=story)
             picks = picks + [t for t in talk if not any(
                 min(t["end"], q["end"]) - max(t["start"], q["start"]) > 0.3 * (t["end"] - t["start"])
                 for q in picks)]
     elif llm is not None and llm.available:
         picks = llm_select(sentences, cands, llm, topic, k, log, min_len, max_len, context=context,
-                           language=language)
+                           language=language, focus=focus, target=target, emap=emap, story=story)
         if picks:
             model = llm.label
 
-    def scored(items: list[dict]) -> list[tuple[dict, Score]]:
+    punctuated = is_punctuated(sentences)
+    terms = focus_terms(focus) if focus else []
+
+    def refined(items: list[dict]) -> list[dict]:
+        """Boundary review: each talk pick's start, end and so its length follow its content."""
         out = []
         for p in items:
+            if p.get("gaming") or p.get("start_sid", -1) < 0:
+                out.append(p)
+                continue
+            rv = review(sentences, p["start_sid"], p["end_sid"], min_len, max_len, punctuated)
+            if target:
+                a2, b2 = stretch_to(sentences, rv.a, rv.b, target, punctuated)
+                if (a2, b2) != (rv.a, rv.b):
+                    rv.a, rv.b = a2, b2
+                    rv.notes.append(f"Lengthened towards the {target:.0f}s you asked for")
+            s, e, words = sentence_span(sentences, rv.a, rv.b)
+            if e - s < min_len or e - s > max_len + 3:
+                continue                   # could not grow into a full moment
+            if (rv.a, rv.b) != (p["start_sid"], p["end_sid"]):
+                hook = p.get("hook") if rv.a == p["start_sid"] else _clean_sentence(sentences[rv.a].text)[:160]
+                p = {**p, "start_sid": rv.a, "end_sid": rv.b, "start": s, "end": e, "words": words,
+                     "text": " ".join(x.text for x in sentences[rv.a : rv.b + 1]), "hook": hook}
+            p["edge_notes"], p["edge_risk"] = rv.notes, rv.risk
+            out.append(p)
+        return out
+
+    def scored(items: list[dict]) -> list[tuple[dict, Score]]:
+        out = []
+        for p in refined(items):
             sc = score_span(p["text"], p["words"], p["end"] - p["start"], p["start"], p["end"],
                             audio, weights=weights, llm_subscores=p.get("scores") or None)
+            if p.get("edge_notes"):
+                sc.reasons = ([p["edge_notes"][0]] + sc.reasons)[:4]
+            if p.get("edge_risk"):
+                sc.risks = ([p["edge_risk"]] + [r for r in sc.risks if "pronoun" not in r])[:4]
+            if emap is not None and not p.get("gaming"):
+                # where the room lights up: a clip holding one of this video's real peaks
+                # (laughs, shouts, a shocked silence-then-reaction) beats a flat one
+                from .story import part_rating, peak_rank
+
+                pr = peak_rank(emap, p["start"], p["end"])
+                sc.features["energy_peak"] = round(pr, 2)
+                bonus = 10 if pr >= 0.97 else 6 if pr >= 0.92 else 2 if pr >= 0.8 else -4 if pr < 0.5 else 0
+                pr_part = part_rating(story, (p["start"] + p["end"]) / 2)
+                if pr_part is not None:
+                    bonus += int(round((pr_part - 5.5) * 1.2))
+                    sc.features["part_rating"] = pr_part
+                sc.total = int(max(0, min(100, sc.total + bonus)))
+                if bonus >= 6:
+                    sc.reasons = ["One of the most intense moments of the video"] + sc.reasons[:3]
+                elif bonus <= -4:
+                    sc.risks = ["Low energy compared to the rest of the video"] + sc.risks[:3]
+            if terms:
+                # the user asked for one kind of moment: matching it beats general virality
+                # (with an AI this is its job; the words are a check that works offline too)
+                hits = focus_hits(f"{p['text']} {p.get('title', '')} {p.get('summary', '')}", terms)
+                sc.features["focus_hits"] = hits
+                if hits:
+                    sc.total = int(min(100, sc.total + min(12, 4 + 4 * hits)))
+                    sc.reasons = ["Matches what you asked for"] + sc.reasons[:3]
+                elif model == "rules":
+                    sc.total = int(max(0, sc.total - 15))
+                    sc.risks = ["Does not mention what you asked for"] + sc.risks[:3]
             if p.get("gaming"):
                 # streams are judged on hype as much as on words: sparse speech is normal there
                 bonus = int(round(30 * (float(p.get("hype", 0.3)) - 0.3)))
@@ -597,13 +739,14 @@ def select(
         return out
 
     def tightened(items: list[tuple[dict, Score]]) -> list[tuple[dict, Score]]:
-        out = [(p, sc) if p.get("gaming") else _tighten_hook(p, sc, sentences, audio, weights, min_len)
+        out = [(p, sc) if p.get("gaming")
+               else _tighten_hook(p, sc, sentences, audio, weights, min_len, punctuated)
                for p, sc in items]
         out.sort(key=lambda x: x[1].total, reverse=True)
         return out
 
     shortlist: list[tuple[dict, Score]] = []
-    cap = max(k * 2, k + 4)       # judge more candidates than we will keep
+    cap = max(k_max * 2, k_max + 4)   # judge more candidates than we will keep
 
     common: set[str] = set()
     if gaming:
@@ -629,7 +772,7 @@ def select(
         take(tightened(scored(heuristic_select(all_cands, sentences, cap * 2))))
 
     if llm is not None and llm.available and len(shortlist) >= 2:
-        viral_judge(shortlist, llm, topic, log)
+        viral_judge(shortlist, llm, topic, log, focus=focus)
     shortlist.sort(key=lambda x: x[1].total, reverse=True)
 
     passed = [x for x in shortlist if x[1].total >= min_score]
@@ -639,12 +782,22 @@ def select(
     # half of what was asked when near-misses (within 12 points) exist
     floor = min(k, max(2, (k + 1) // 2))
     if len(passed) < floor:
-        extra = [x for x in shortlist if x not in passed and x[1].total >= min_score - 12]
+        ids = {id(x) for x in passed}
+        extra = [x for x in shortlist if id(x) not in ids and x[1].total >= min_score - 12
+                 and not x[1].features.get("housekeeping")]   # never rescue an intro / plug
         added = extra[: floor - len(passed)]
         if added and log:
             log(f"quality bar: kept {len(added)} near-miss clips so you still get {len(passed) + len(added)}")
         passed = sorted(passed + added, key=lambda x: x[1].total, reverse=True)
     chosen = (passed or shortlist[:1])[:k]
+    if auto_count and len(passed) > k:
+        # more strong moments than the target: keep the ones that clear the bar clearly
+        strong = max(min_score + 7, 70)
+        bonus = [x for x in passed[k:k_max] if x[1].total >= strong]
+        if bonus:
+            chosen = chosen + bonus
+            if log:
+                log(f"clip count: +{len(bonus)} extra clips scoring {strong}+ (this video has more good moments)")
 
     cjk_ok = (language or "")[:2] in ("zh", "ja", "ko")
 
@@ -657,10 +810,15 @@ def select(
     for rank, (p, sc) in enumerate(chosen, start=1):
         sc.grade = grade(sc.total)
         title = clean(p.get("title")) or clean(make_title(p["text"])) or "Highlight"
+        start, end = p["start"], p["end"]
+        if not p.get("gaming") and p.get("start_sid", -1) >= 0:
+            # a hair before the first word and after the last: no clipped consonant, the
+            # last word lands fully (gaming picks are already padded by their own snap)
+            start, end = padded_edges(sentences, p["start_sid"], p["end_sid"])
         clip = Clip(
             id=f"clip_{rank:02d}",
-            start=round(p["start"], 3),
-            end=round(p["end"], 3),
+            start=round(start, 3),
+            end=round(end, 3),
             title=title,
             hook=p.get("hook") or "",
             summary=clean(p.get("summary")) or " ".join(p["text"].split()[:38]),

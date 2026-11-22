@@ -53,6 +53,9 @@ def probe_url(url: str) -> dict:
         "url": url,
         "id": d.get("id"),
         "title": d.get("title") or url,
+        # who made it: titles and banners should name the streamer, not guess from speech
+        "channel": d.get("channel") or d.get("uploader") or "",
+        "description": (d.get("description") or "")[:600],
         "duration": float(d.get("duration") or 0),
         "fetched": time.time(),
         "video": {"url": v["url"], "format": v.get("format_id"), "width": v.get("width") or 0,

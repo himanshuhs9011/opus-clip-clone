@@ -11,6 +11,7 @@ import re
 import shutil
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
@@ -22,7 +23,7 @@ from opusclip import pipeline
 from opusclip.captions import list_styles
 from opusclip.config import settings, update_env
 from opusclip.edit import ASPECTS, DEFAULT_EDIT, FILTERS, LAYOUTS
-from opusclip import providers
+from opusclip import providers, wizard
 from opusclip.llm import LLM, OLLAMA_PICKS, health as llm_health, ollama_models, pull_state, start_pull
 from opusclip.render import encoder_name, preview_plan
 from opusclip.text import download
@@ -274,7 +275,10 @@ async def create_project(
     url: str = Form(""),
     options: str = Form("{}"),
 ) -> dict:
-    opts = _options(options)
+    return await _create(file, url, _options(options))
+
+
+async def _create(file: UploadFile | None, url: str, opts: dict) -> dict:
     opts["length"] = "ai"     # clip length is decided by the AI per clip, not by a setting
     if file is not None and file.filename:
         suffix = Path(file.filename).suffix.lower()
@@ -333,6 +337,111 @@ def rerun(pid: str, body: dict = Body(default={})) -> dict:
     except FileNotFoundError as e:
         raise HTTPException(400, str(e))
     return {"id": pid, "status": p.status if p else "error"}
+
+
+@app.post("/api/projects/{pid}/finish")
+def finish(pid: str, body: dict = Body(default={})) -> dict:
+    """Make (render) the clips the user picked; ids=null makes every clip found."""
+    _project_or_404(pid)
+    ids = body.get("ids")
+    if ids is not None and (not isinstance(ids, list) or not all(isinstance(x, str) for x in ids)):
+        raise HTTPException(400, "ids must be a list of clip ids")
+    try:
+        p = pipeline.finish(pid, ids)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {"id": pid, "status": p.status if p else "error"}
+
+
+# --------------------------------------------------------------------------
+# Clip Agent: describe the clips you want in plain words (opusclip/wizard.py)
+# --------------------------------------------------------------------------
+_ai_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="agent")   # never blocks clip jobs
+
+
+def _read_request(text: str, use_ai: bool = True) -> dict:
+    req = wizard.parse_request(text)
+    if use_ai and wizard.needs_ai_focus(req):
+        llm = LLM(providers.active())
+        if llm.provider != "none" and llm.available:
+            # the plan card must not hang on a cold local model: give the AI 25 s at most
+            fut = _ai_pool.submit(wizard.ai_focus, text, llm)
+            try:
+                f = fut.result(timeout=25)
+            except Exception:
+                f = None
+            if f:
+                req["focus"] = f
+                req["focus_by"] = "ai"
+    return req
+
+
+@app.post("/api/agent/plan")
+def agent_plan(body: dict = Body(...)) -> dict:
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "say what clips you want")
+    req = _read_request(text, use_ai=bool(body.get("ai", True)))
+    return {"request": req, "plan": wizard.plan(req, has_source=bool(body.get("has_file")))}
+
+
+@app.post("/api/agent/start")
+async def agent_start(
+    file: UploadFile | None = File(None),
+    text: str = Form(""),
+    request: str = Form(""),
+    options: str = Form("{}"),
+) -> dict:
+    """Start a find -> pick -> make project from an approved plan."""
+    req = _options(request) if request else _read_request(text, use_ai=False)
+    if not req:
+        req = wizard.parse_request(text)
+    url = str(req.get("url") or "")
+    if (file is None or not file.filename) and not url:
+        raise HTTPException(400, "send the video: paste a link or attach a file")
+    opts = wizard.to_options(req, _options(options))
+    return await _create(file, url, opts)
+
+
+@app.post("/api/agent/followup")
+def agent_followup(body: dict = Body(...)) -> dict:
+    """A message about a project already found: "make 3", "make all", or a new ask
+    ("only the funny ones", "shorter, under 20 seconds") that re-finds clips."""
+    pid = str(body.get("pid") or "")
+    p = _project_or_404(pid)
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "say what to change")
+    req = _read_request(text)
+    if req.get("make"):
+        cands = sorted([c for c in p.clips if (c.render or {}).get("status") == "candidate"],
+                       key=lambda c: -(c.score.total if c.score else 0))
+        ids = [c.id for c in cands] if req["make"] == "all" else [c.id for c in cands[: int(req["make"])]]
+        try:
+            pipeline.finish(pid, ids)
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
+        return {"action": "make", "ids": ids}
+    # a new ask on the same video: keep what the user said before unless they changed it
+    prev = dict(p.options or {})
+    new = wizard.to_options(req, prev)
+    for k in ("max_clip", "min_clip", "range"):
+        if req.get(k) is None and prev.get(k) is not None:
+            new[k] = prev[k]
+    if not req.get("count") and prev.get("clips"):
+        new["clips"] = prev["clips"]
+    if req.get("format") == "short" and not re.search(r"\bshorts?\b|\breels?\b|\btiktoks?\b", text, re.I):
+        new["format"], new["long_len"] = prev.get("format") or "short", prev.get("long_len")
+    if not req.get("focus") and not re.search(r"\b(any|all|everything|best)\b", text, re.I):
+        new["focus"] = prev.get("focus") or ""
+    try:
+        pipeline.rerun(pid, new)
+    except FileNotFoundError as e:
+        raise HTTPException(400, str(e))
+    merged = {**req, "focus": new.get("focus"), "max_clip": new.get("max_clip"),
+              "min_clip": new.get("min_clip"), "range": new.get("range"),
+              "count": new.get("clips") or None}
+    return {"action": "refind", "request": merged, "plan": wizard.plan(merged, has_source=True)}
 
 
 @app.put("/api/projects/{pid}/clips/{cid}")
@@ -405,12 +514,24 @@ def zip_project(pid: str):
             base = f"{c.rank:02d}_{slug}"
             z.write(d / c.file, f"{base}.mp4")
             sc = c.score.total if c.score else "?"
-            z.writestr(f"{base}.txt", f"{c.title}\n\n{' '.join(c.hashtags)}\n\n"
-                                      f"Virality score: {sc}/100\n{c.why}\n")
+            pk = c.package or {}
+            chapters = "\n".join(f"{int(t // 60)}:{int(t % 60):02d} {label}" for t, label in pk.get("chapters") or [])
+            z.writestr(f"{base}.txt",
+                       f"YouTube title: {pk.get('yt_title') or c.title}\n"
+                       f"Thumbnail text: {pk.get('thumbnail_text') or ''}\n\n"
+                       f"{pk.get('description') or c.summary}\n\n"
+                       + (f"Chapters:\n{chapters}\n\n" if chapters else "")
+                       + f"{' '.join(c.hashtags)}\n\nVirality score: {sc}/100\n{c.why}\n")
     buf.seek(0)
-    name = re.sub(r"[^\w-]+", "_", p.name)[:40] or pid
+    # HTTP headers are latin-1: a Hindi / emoji project name crashed the download. Send an
+    # ASCII fallback plus the real name as RFC 5987 filename*.
+    from urllib.parse import quote
+
+    ascii_name = re.sub(r"[^A-Za-z0-9_-]+", "_", p.name).strip("_")[:40] or pid
+    full = re.sub(r"[^\w-]+", "_", p.name)[:40] or pid
+    disp = f"attachment; filename=\"{ascii_name}_clips.zip\"; filename*=UTF-8''{quote(full + '_clips.zip')}"
     return StreamingResponse(buf, media_type="application/zip",
-                             headers={"Content-Disposition": f'attachment; filename="{name}_clips.zip"'})
+                             headers={"Content-Disposition": disp})
 
 
 # --------------------------------------------------------------------------

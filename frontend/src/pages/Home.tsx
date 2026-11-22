@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Film, Link2, Loader2, Trash2, Upload, Wand2 } from "lucide-react";
+import { Film, Link2, Loader2, MessageSquare, Trash2, Upload, Wand2 } from "lucide-react";
 import { api, media, type Health, type Options, type Presets, type ProjectSummary } from "../api";
 import { OptionsForm } from "../components/OptionsForm";
 import { fmtDuration, go, scoreTone, timeAgo, useInterval } from "../lib/util";
 
 const STAGE: Record<string, string> = {
   queued: "Queued", download: "Downloading", probe: "Reading", audio: "Audio", transcribe: "Transcribing",
-  analyse: "Finding highlights", render: "Rendering", done: "Done", error: "Failed",
+  analyse: "Finding highlights", render: "Rendering", pick: "Pick clips to make", done: "Done", error: "Failed",
 };
 
 export function Home({ presets, health }: { presets: Presets | null; health: Health | null }) {
@@ -178,6 +178,9 @@ export function Home({ presets, health }: { presets: Presets | null; health: Hea
           {busy ? (uploadPct > 0 && uploadPct < 1 ? `Uploading ${Math.round(uploadPct * 100)}%` : "Starting…") : "Get clips"}
         </button>
         {err && <div className="err-text center">{err}</div>}
+        <a className="agent-link small" href="#/agent">
+          <MessageSquare size={14} /> Or just say what you want: "only the funny parts, under 30 seconds"
+        </a>
       </section>
 
       <section>
@@ -205,7 +208,9 @@ export function Home({ presets, health }: { presets: Presets | null; health: Hea
                     ? `${STAGE[p.stage] ?? p.stage} · ${Math.round(p.progress * 100)}%`
                     : p.status === "error"
                       ? "Failed"
-                      : `${p.clips} clips`}{" "}
+                      : p.status === "picking"
+                        ? `${p.clips} found · pick to make`
+                        : `${p.clips} clips`}{" "}
                   · {fmtDuration(p.duration)} · {timeAgo(p.created)}
                 </div>
               </div>

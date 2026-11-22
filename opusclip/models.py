@@ -97,6 +97,9 @@ class Clip:
     edit: dict = field(default_factory=dict)       # user edits, see edit.DEFAULT_EDIT
     render: dict = field(default_factory=dict)     # {status, progress, error, seconds, encoder}
     error: str | None = None
+    kind: str = "short"       # short (vertical, 12 s - 3 min) | long (16:9 episode, ~5-20 min)
+    # ready-to-post text: yt_title, thumbnail_text, description, chapters [[t, label], ...]
+    package: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
@@ -125,6 +128,8 @@ class Clip:
             "edit": self.edit,
             "render": self.render,
             "error": self.error,
+            "kind": self.kind,
+            "package": self.package,
         }
 
     @classmethod
@@ -137,6 +142,7 @@ class Clip:
             file=c.get("file"),
             thumb=c.get("thumb"), version=c.get("version", 0), track=c.get("track") or {},
             edit=c.get("edit") or {}, render=c.get("render") or {}, error=c.get("error"),
+            kind=c.get("kind") or "short", package=c.get("package") or {},
         )
         if c.get("score"):
             clip.score = Score.from_dict(c["score"])
