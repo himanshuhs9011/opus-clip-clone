@@ -287,7 +287,7 @@ def overview(sentences: list[Sentence], score: np.ndarray, llm: LLM, context: st
         log("gaming agent: reading the whole stream")
     try:
         data = llm.json_completion(OVERVIEW_SYSTEM.format(lang=lang), user, schema=OVERVIEW_SCHEMA,
-                                   max_tokens=2000, temperature=0.3)
+                                   max_tokens=2000, temperature=0.15)
     except LLMError as e:
         if log:
             log(f"gaming agent: overview skipped ({str(e)[:120]})")
@@ -446,7 +446,7 @@ def agent_select(sentences: list[Sentence], audio: AudioFeatures, duration: floa
                     + f"\n\nReview every candidate ({ids}): one entry per id, even when keep is false.{note}")
             try:
                 data = llm.json_completion(system, user, schema=AGENT_SCHEMA, max_tokens=3000,
-                                           temperature=0.3)
+                                           temperature=0.1)
             except LLMError as e:
                 if log:
                     log(f"gaming agent: review failed ({str(e)[:120]})")

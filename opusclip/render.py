@@ -80,12 +80,16 @@ def encoder_name() -> str:
     return "NVENC (GPU)" if _nvenc_ok() else "x264 (CPU)"
 
 
-def _video_args(gpu: bool) -> list[str]:
+def _video_args(gpu: bool, long: bool = False) -> list[str]:
+    """``long``: a 10-20 min 16:9 episode. Busy gameplay at the shorts' quality ran at ~12 Mbps
+    (1.26 GB for 14 min); YouTube recommends ~8 Mbps for 1080p30, so long videos cap at 10."""
+    rate, buf = ("10M", "20M") if long else ("25M", "50M")
     if gpu:
         return ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr",
-                "-cq", str(max(15, settings.crf + 1)), "-b:v", "0", "-maxrate", "25M",
-                "-bufsize", "50M", "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60"]
-    return ["-c:v", "libx264", "-preset", settings.preset, "-crf", str(settings.crf),
+                "-cq", str(max(15, settings.crf + (3 if long else 1))), "-b:v", "0", "-maxrate", rate,
+                "-bufsize", buf, "-profile:v", "high", "-pix_fmt", "yuv420p", "-g", "60"]
+    return ["-c:v", "libx264", "-preset", settings.preset, "-crf", str(settings.crf + (2 if long else 0)),
+            *(["-maxrate", rate, "-bufsize", buf] if long else []),
             "-profile:v", "high", "-pix_fmt", "yuv420p"]
 
 
@@ -608,7 +612,7 @@ def render_clip(src: str | Path, src_w: int, src_h: int, has_audio: bool, clip: 
         cmd += [_graph_option(), str(fg_path), "-map", "[v]"]
         if has_audio:
             cmd += ["-map", "[a]", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
-        cmd += _video_args(gpu)
+        cmd += _video_args(gpu, long=getattr(clip, "kind", "short") == "long")
         cmd += ["-t", f"{dur:.3f}", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats",
                 str(video_path)]
         proc = subprocess.Popen(cmd, cwd=str(out_dir), stdout=subprocess.PIPE, **NO_WINDOW,

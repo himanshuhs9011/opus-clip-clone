@@ -377,6 +377,59 @@ export interface ProvidersState {
   pull: PullState;
 }
 
+
+// Autopilot (opusclip/autopilot.py)
+export interface AutoSource {
+  id: string;
+  url: string;
+  name: string;
+  format: "short" | "long" | "both";
+  focus: string;
+  added: number;
+  enabled: boolean;
+}
+
+export interface AutoItem {
+  id: string;
+  pid: string;
+  cid: string;
+  kind: "short" | "long";
+  platform: "youtube" | "instagram" | "facebook" | "phone";
+  status: "review" | "waiting" | "posted" | "failed" | "skipped";
+  score: number;
+  title: string;
+  source: string;
+  added: number;
+  posted?: number;
+  url: string;
+  error: string;
+}
+
+export interface AutoState {
+  enabled: boolean;
+  review: boolean;
+  credit: boolean;
+  check_minutes: number;
+  min_score: number;
+  post_times: string[];
+  per_day: Record<"youtube_short" | "youtube_long" | "instagram" | "facebook" | "phone", number>;
+  youtube_privacy: "public" | "unlisted" | "private";
+  sources: AutoSource[];
+  accounts: {
+    youtube: { client_id: string; has_secret: boolean; connected: boolean; channel: string };
+    meta: { app_id: string; has_secret: boolean; connected: boolean; page_id: string; page_name: string;
+            ig_username: string; pages: { id: string; name: string; ig_username: string }[] };
+  };
+  jobs: { pid: string; source_name: string; title: string; status: string; started: number }[];
+  queue: AutoItem[];
+  today: Record<string, number>;
+  last_check: number;
+  next_post: string;
+  phone_dir: string;
+  running: boolean;
+  log: [number, string][];
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, init);
   if (!r.ok) {
@@ -433,6 +486,22 @@ export const api = {
     req<{ action: "make" | "refind"; ids?: string[]; request?: AgentRequest; plan?: AgentPlan }>(
       "/api/agent/followup", json("POST", { pid, text })),
   finish: (pid: string, ids: string[] | null) => req<{ id: string; status: string }>(`/api/projects/${pid}/finish`, json("POST", { ids })),
+  autopilot: () => req<AutoState>("/api/autopilot"),
+  autopilotUpdate: (v: Partial<AutoState>) => req<AutoState>("/api/autopilot", json("PUT", v)),
+  autopilotAddSource: (v: { url: string; format: string; focus: string; backfill: number }) =>
+    req<AutoState>("/api/autopilot/sources", json("POST", v)),
+  autopilotRemoveSource: (id: string) => req<AutoState>(`/api/autopilot/sources/${id}`, { method: "DELETE" }),
+  autopilotCheck: () => req<AutoState>("/api/autopilot/check", { method: "POST" }),
+  autopilotPostNow: () => req<AutoState>("/api/autopilot/post-now", { method: "POST" }),
+  autopilotItem: (id: string, action: "approve" | "skip" | "retry") =>
+    req<AutoState>(`/api/autopilot/queue/${id}/${action}`, { method: "POST" }),
+  autopilotYoutube: (client_id: string, client_secret: string) =>
+    req<{ auth_url: string; redirect_uri: string }>("/api/autopilot/youtube", json("PUT", { client_id, client_secret })),
+  autopilotMeta: (app_id: string, app_secret: string, user_token: string) =>
+    req<AutoState>("/api/autopilot/meta", json("PUT", { app_id, app_secret, user_token })),
+  autopilotMetaPage: (page_id: string) => req<AutoState>("/api/autopilot/meta/page", json("PUT", { page_id })),
+  autopilotDisconnect: (name: "youtube" | "meta") =>
+    req<AutoState>(`/api/autopilot/accounts/${name}`, { method: "DELETE" }),
   applyAll: (pid: string, edit: Partial<Edit>, render = true) =>
     req<{ ok: boolean }>(`/api/projects/${pid}/apply-all`, json("POST", { edit, render })),
 };

@@ -7,7 +7,7 @@
   #define OutDir "..\dist"
 #endif
 #define AppName "ClipForge"
-#define AppVersion "2.0.0"
+#define AppVersion "2.1.0"
 #define RepoURL "https://github.com/himanshuhs9011/opus-clip-clone"
 
 [Setup]

@@ -307,7 +307,7 @@ def llm_select(sentences: list[Sentence], cands: list[Candidate], llm: LLM, topi
         if log:
             log(f"AI ({llm.label}) reading part {wi}/{len(windows)}")
         try:
-            data = llm.json_completion(SYSTEM, user, schema=SCHEMA, max_tokens=4000, temperature=0.3)
+            data = llm.json_completion(SYSTEM, user, schema=SCHEMA, max_tokens=4000, temperature=0.15)
         except LLMError as e:
             failures += 1
             if log:
@@ -556,7 +556,7 @@ def viral_judge(shortlist: list[tuple[dict, Score]], llm: LLM, topic: str, log=N
         log(f"AI viral judge comparing {len(shortlist)} candidates")
     try:
         data = llm.json_completion(JUDGE_SYSTEM, user, schema=JUDGE_SCHEMA, max_tokens=2500,
-                                   temperature=0.2)
+                                   temperature=0.0)
     except LLMError as e:
         if log:
             log(f"viral judge skipped: {str(e)[:120]}")
@@ -569,15 +569,29 @@ def viral_judge(shortlist: list[tuple[dict, Score]], llm: LLM, topic: str, log=N
             continue
     # one scale for the whole answer: judging per number turned a harsh 8/100 into 80/100
     scale = _scale_for([v.get("viral") for v in verdicts.values()])
+    nums: dict[int, float] = {}
+    for i, _ in enumerate(shortlist):
+        raw = (verdicts.get(i) or {}).get("viral")
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            nums[i] = max(0.0, min(100.0, float(raw) * scale))
+    # Consistency: the judge decides the ORDER. Its overall mood (harsh on one run, generous
+    # on the next) moved every score by the same amount and decided how many clips passed
+    # the quality bar - the same stream gave 19 clips once and 10 the next time. Half of the
+    # gap between its average and the measured average is taken out, so a really weak batch
+    # still scores lower, but a mood swing no longer halves the clip count.
+    shift = 0.0
+    if len(nums) >= 3:
+        mean_v = sum(nums.values()) / len(nums)
+        mean_s = sum(shortlist[i][1].total for i in nums) / len(nums)
+        shift = 0.5 * (mean_s - mean_v)
+        if log and abs(shift) >= 3:
+            log(f"viral judge: averaged {mean_v:.0f} vs {mean_s:.0f} measured, evened out by {shift:+.0f}")
     for i, (p, sc) in enumerate(shortlist):
         v = verdicts.get(i)
-        if not v:
-            continue
-        raw = v.get("viral")
-        if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        if not v or i not in nums:
             continue                      # no number: leave this clip's score alone
-        viral = max(0.0, min(100.0, float(raw) * scale))
-        total = 0.6 * sc.total + 0.4 * viral
+        viral = nums[i]
+        total = 0.6 * sc.total + 0.4 * max(0.0, min(100.0, viral + shift))
         reason = str(v.get("reason") or "").strip()[:160]
         if str(v.get("verdict")).lower() == "skip":
             total -= 6
@@ -695,17 +709,22 @@ def select(
                 sc.reasons = ([p["edge_notes"][0]] + sc.reasons)[:4]
             if p.get("edge_risk"):
                 sc.risks = ([p["edge_risk"]] + [r for r in sc.risks if "pronoun" not in r])[:4]
-            if emap is not None and not p.get("gaming"):
+            if emap is not None:
                 # where the room lights up: a clip holding one of this video's real peaks
                 # (laughs, shouts, a shocked silence-then-reaction) beats a flat one
                 from .story import part_rating, peak_rank
 
                 pr = peak_rank(emap, p["start"], p["end"])
                 sc.features["energy_peak"] = round(pr, 2)
-                bonus = 10 if pr >= 0.97 else 6 if pr >= 0.92 else 2 if pr >= 0.8 else -4 if pr < 0.5 else 0
+                bonus = 0
+                if not p.get("gaming"):        # streams already score their hype below
+                    bonus = 10 if pr >= 0.97 else 6 if pr >= 0.92 else 2 if pr >= 0.8 else -4 if pr < 0.5 else 0
                 pr_part = part_rating(story, (p["start"] + p["end"]) / 2)
                 if pr_part is not None:
-                    bonus += int(round((pr_part - 5.5) * 1.2))
+                    # the story log is built once and cached, so this is the same on every
+                    # run: it anchors the ranking where the per-run AI review wobbles (two
+                    # runs on one 4-hour stream agreed on only 4 of 14 shorts without it)
+                    bonus += int(round((pr_part - 5.5) * (2.0 if p.get("gaming") else 1.2)))
                     sc.features["part_rating"] = pr_part
                 sc.total = int(max(0, min(100, sc.total + bonus)))
                 if bonus >= 6:

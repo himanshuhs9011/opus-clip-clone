@@ -24,6 +24,7 @@ export function Header({ health, onSettings }: { health: Health | null; onSettin
       <nav className="top-nav">
         <a href="#/">Projects</a>
         <a href="#/agent">Agent</a>
+        <a href="#/autopilot">Autopilot</a>
       </nav>
       <div className="top-right">
         {health && (

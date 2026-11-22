@@ -116,6 +116,37 @@ is cut, `opusclip/story.py` builds this context once per video (cached for Re-ru
 
 Without an AI all of this still runs on the engagement map and transcript, with simpler text.
 
+## Autopilot (clip and post every day by itself)
+
+**Autopilot** in the top bar (`#/autopilot`) runs inside the server while ClipForge is open:
+
+1. **Channels to watch:** paste a YouTube channel (its uploads and past streams are both
+   checked), or a Kick / Twitch videos page. Each source has a format (shorts, long videos,
+   both) and an optional focus ("only funny moments"). Every `check_minutes` it looks for
+   finished videos it has not clipped yet (live streams wait until they end; videos under
+   3 minutes are skipped) and clips them one at a time.
+2. **Posts:** every finished clip scoring at least `min_score` is queued once per platform:
+   shorts to YouTube Shorts, Instagram Reels, Facebook Reels and the phone folder; long videos
+   to YouTube. At each posting time the best waiting clips go out, within each platform's
+   daily cap. Turn on approval to OK every clip first; failed posts can be retried.
+3. **Accounts** use the official APIs, never passwords:
+   - YouTube: a Google Cloud project with *YouTube Data API v3* and an OAuth client of type
+     *Desktop app*; then *Sign in with Google*. Only a refresh token is stored. A new project
+     can upload about 6 videos a day (10,000 quota units, ~1,600 per upload), and uploads stay
+     private until the project passes YouTube's API audit.
+   - Instagram + Facebook: an Instagram Business / Creator account linked to a Facebook Page,
+     a Meta app, and a user token from Graph API Explorer with `pages_show_list,
+     pages_read_engagement, pages_manage_posts, instagram_basic, instagram_content_publish,
+     business_management`. It is swapped for a Page token that does not expire.
+   - Snapchat Spotlight, Moj and Josh have no upload API: their clips are copied with captions
+     to `autopilot_phone/<date>/` to post from a phone. TikTok is left out (not in India).
+4. Captions come from each clip's package (YouTube title, description, chapters for long
+   videos, hashtags, `#Shorts`), with a "Source: <channel>" credit line by default.
+
+Everything (tokens included) is kept in `autopilot.json` in the data folder; it is in
+`.gitignore`. Only clip channels you own or have permission for: re-uploading other people's
+videos gets copyright strikes and Content ID claims.
+
 ## Clip Agent (say what you want)
 
 **Agent** in the top bar (`#/agent`) takes a request in plain words, with a link or an

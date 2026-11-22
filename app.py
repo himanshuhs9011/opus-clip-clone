@@ -4,17 +4,19 @@
 """
 from __future__ import annotations
 
+import html
 import io
 import json
 import os
 import re
 import shutil
+import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,12 +25,12 @@ from opusclip import pipeline
 from opusclip.captions import list_styles
 from opusclip.config import settings, update_env
 from opusclip.edit import ASPECTS, DEFAULT_EDIT, FILTERS, LAYOUTS
-from opusclip import providers, wizard
+from opusclip import autopilot, providers, publish, wizard
 from opusclip.llm import LLM, OLLAMA_PICKS, health as llm_health, ollama_models, pull_state, start_pull
 from opusclip.render import encoder_name, preview_plan
 from opusclip.text import download
 
-app = FastAPI(title="ClipForge", version="2.0.0")
+app = FastAPI(title="ClipForge", version="2.1.0")
 
 DIST = settings.root / "frontend" / "dist"
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".flv", ".ts", ".wmv"}
@@ -442,6 +444,175 @@ def agent_followup(body: dict = Body(...)) -> dict:
               "min_clip": new.get("min_clip"), "range": new.get("range"),
               "count": new.get("clips") or None}
     return {"action": "refind", "request": merged, "plan": wizard.plan(merged, has_source=True)}
+
+
+# --------------------------------------------------------------------------
+# Autopilot: watch channels, clip new videos, post on a schedule (opusclip/autopilot.py)
+# --------------------------------------------------------------------------
+@app.on_event("startup")
+def _start_autopilot() -> None:
+    autopilot.start()
+
+
+@app.get("/api/autopilot")
+def autopilot_state() -> dict:
+    return autopilot.public()
+
+
+@app.put("/api/autopilot")
+def autopilot_update(body: dict = Body(...)) -> dict:
+    try:
+        return autopilot.update(body)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/autopilot/sources")
+def autopilot_add_source(body: dict = Body(...)) -> dict:
+    try:
+        autopilot.add_source(str(body.get("url") or ""), fmt=str(body.get("format") or "both"),
+                             focus=str(body.get("focus") or ""), backfill=int(body.get("backfill", 1)),
+                             name=str(body.get("name") or ""))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return autopilot.public()
+
+
+@app.delete("/api/autopilot/sources/{sid}")
+def autopilot_remove_source(sid: str) -> dict:
+    autopilot.remove_source(sid)
+    return autopilot.public()
+
+
+@app.post("/api/autopilot/check")
+def autopilot_check_now() -> dict:
+    """Look for new videos now (in the background) instead of waiting for the next check."""
+    def job() -> None:
+        try:
+            autopilot.follow_jobs()
+            n = autopilot.check_sources()
+            autopilot.log("check now: " + ("started a new video" if n else "nothing new (or a video is still being clipped)"))
+        except Exception as e:
+            autopilot.log(f"check failed: {str(e)[:200]}")
+    _ai_pool.submit(job)
+    return autopilot.public()
+
+
+@app.post("/api/autopilot/post-now")
+def autopilot_post_now() -> dict:
+    """Post the next waiting clips now (up to today's caps)."""
+    def job() -> None:
+        n = autopilot.post_round(force=False)
+        autopilot.log(f"post now: {n} posted")
+    _ai_pool.submit(job)
+    return autopilot.public()
+
+
+@app.post("/api/autopilot/queue/{item_id}/{action}")
+def autopilot_queue_action(item_id: str, action: str) -> dict:
+    if action not in ("approve", "skip", "retry"):
+        raise HTTPException(400, "unknown action")
+    if not autopilot.set_item(item_id, action):
+        raise HTTPException(404, "queue item not found")
+    return autopilot.public()
+
+
+_yt_states: dict[str, float] = {}
+
+
+def _yt_redirect(request: Request) -> str:
+    return str(request.base_url).rstrip("/") + "/api/autopilot/youtube/callback"
+
+
+@app.put("/api/autopilot/youtube")
+def autopilot_youtube(request: Request, body: dict = Body(...)) -> dict:
+    """Save the Google OAuth client and return the sign-in link."""
+    cid = str(body.get("client_id") or "").strip()
+    secret = str(body.get("client_secret") or "").strip()
+    with autopilot._lock:
+        acc = autopilot.load()["accounts"].setdefault("youtube", {})
+        if cid:
+            acc["client_id"] = cid
+        if secret:
+            acc["client_secret"] = secret
+        ready = bool(acc.get("client_id") and acc.get("client_secret"))
+    autopilot.save()
+    if not ready:
+        raise HTTPException(400, "add the OAuth client ID and secret first")
+    state = uuid.uuid4().hex
+    _yt_states[state] = time.time()
+    return {"auth_url": publish.youtube_auth_url(acc["client_id"], _yt_redirect(request), state),
+            "redirect_uri": _yt_redirect(request)}
+
+
+@app.get("/api/autopilot/youtube/callback", include_in_schema=False)
+def autopilot_youtube_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if error or not code:
+        return HTMLResponse(f"<p>Google sign-in was cancelled ({html.escape(error or 'no code')}). "
+                            "<a href='/#/autopilot'>Back to Autopilot</a></p>")
+    if state not in _yt_states or time.time() - _yt_states.pop(state) > 900:
+        return HTMLResponse("<p>This sign-in link expired. <a href='/#/autopilot'>Try again</a></p>", 400)
+    acc = autopilot.load()["accounts"]["youtube"]
+    try:
+        tok = publish.youtube_exchange(acc["client_id"], acc["client_secret"], code, _yt_redirect(request))
+        ch = publish.youtube_channel(tok["access_token"])
+    except publish.PublishError as e:
+        return HTMLResponse(f"<p>Could not connect YouTube: {html.escape(str(e))}. "
+                            "<a href='/#/autopilot'>Back</a></p>", 400)
+    with autopilot._lock:
+        acc.update(refresh_token=tok["refresh_token"], channel_id=ch["id"], channel_title=ch["title"])
+    autopilot.save()
+    autopilot.log(f"YouTube connected: {ch['title']}")
+    return HTMLResponse("<script>location.replace('/#/autopilot')</script>")
+
+
+@app.put("/api/autopilot/meta")
+def autopilot_meta(body: dict = Body(...)) -> dict:
+    """Connect Instagram + Facebook: app ID, app secret and a user token from Graph API Explorer."""
+    app_id = str(body.get("app_id") or "").strip()
+    secret = str(body.get("app_secret") or "").strip()
+    token = str(body.get("user_token") or "").strip()
+    with autopilot._lock:
+        acc = autopilot.load()["accounts"].setdefault("meta", {})
+        app_id, secret = app_id or acc.get("app_id", ""), secret or acc.get("app_secret", "")
+    if not (app_id and secret and token):
+        raise HTTPException(400, "app ID, app secret and an access token are all needed")
+    try:
+        res = publish.meta_connect(app_id, secret, token)
+    except publish.PublishError as e:
+        raise HTTPException(400, str(e))
+    pages = res["pages"]
+    pick = next((p for p in pages if p["ig_id"]), pages[0])
+    with autopilot._lock:
+        acc.update(app_id=app_id, app_secret=secret, pages=pages, page_id=pick["id"], page_name=pick["name"],
+                   token=pick["token"], ig_id=pick["ig_id"], ig_username=pick["ig_username"])
+    autopilot.save()
+    autopilot.log(f"Meta connected: Page {pick['name']}" + (f", Instagram @{pick['ig_username']}" if pick["ig_username"] else ""))
+    return autopilot.public()
+
+
+@app.put("/api/autopilot/meta/page")
+def autopilot_meta_page(body: dict = Body(...)) -> dict:
+    with autopilot._lock:
+        acc = autopilot.load()["accounts"].get("meta") or {}
+        page = next((p for p in acc.get("pages") or [] if p["id"] == str(body.get("page_id"))), None)
+        if not page:
+            raise HTTPException(404, "page not found")
+        acc.update(page_id=page["id"], page_name=page["name"], token=page["token"],
+                   ig_id=page["ig_id"], ig_username=page["ig_username"])
+    autopilot.save()
+    return autopilot.public()
+
+
+@app.delete("/api/autopilot/accounts/{name}")
+def autopilot_disconnect(name: str) -> dict:
+    if name not in ("youtube", "meta"):
+        raise HTTPException(404, "unknown account")
+    with autopilot._lock:
+        autopilot.load()["accounts"][name] = {}
+    autopilot.save()
+    autopilot.log(f"{name} disconnected")
+    return autopilot.public()
 
 
 @app.put("/api/projects/{pid}/clips/{cid}")

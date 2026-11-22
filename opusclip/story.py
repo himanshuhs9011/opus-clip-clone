@@ -31,7 +31,7 @@ from .boundaries import is_punctuated, mid_sentence, opening_issue
 from .llm import LLM, LLMError
 from .models import Sentence
 
-STORY_VERSION = 3
+STORY_VERSION = 4
 PART_SECONDS = 300.0          # one story-log part
 PARTS_PER_CALL = 8            # parts logged per AI call (the answer has to fit as well)
 
@@ -178,6 +178,9 @@ next to them while cutting it. Return STRICT JSON only:
 "summary":"3 sentences: what happens over the whole video",
 "storylines":["a running story or joke, and where it pays off (in seconds)"],
 "best":"the single moment people will talk about, with its time in seconds"}
+Name things the way viewers search for them: the streamer by the name fans know (the channel
+name helps), and the game by its real title. A city, map or mode in the stream title is not
+the game's name - work out which game it is from what happens (characters, missions, version).
 {lang}"""
 
 
@@ -245,7 +248,7 @@ def build_story(sentences: list[Sentence], emap: np.ndarray, duration: float, ll
                     + f"\n\nLog every part ({', '.join(str(p['id']) for p in batch)}).")
             try:
                 data = llm.json_completion(system, user, schema=PARTS_SCHEMA,
-                                           max_tokens=min(8000, 500 + 260 * len(batch)), temperature=0.2)
+                                           max_tokens=min(8000, 500 + 260 * len(batch)), temperature=0.1)
             except LLMError as e:
                 if len(batch) > 1:          # retry as two smaller calls instead of losing them all
                     if log:
@@ -464,7 +467,7 @@ def long_select(sentences: list[Sentence], emap: np.ndarray, story: dict, llm: L
             log(f"AI planning {k} long episodes from the story log")
         try:
             data = llm.json_completion(LONG_SYSTEM.format(lo=lo, hi=hi, target=target, lang=_lang_line(language)),
-                                       user, schema=LONG_SCHEMA, max_tokens=3500, temperature=0.3)
+                                       user, schema=LONG_SCHEMA, max_tokens=3500, temperature=0.15)
             raw = [x for x in (data.get("episodes") or []) if isinstance(x, dict)]
         except LLMError as e:
             if log:
